@@ -994,8 +994,10 @@ def page_vouchers():
 # ── PRINTING & REPORT HELPERS ──────────────────────────────────────
 import base64
 
-def get_printable_html_link(title, subtitle, html_table_content):
-    """Generates a base64 encoded data URI to trigger an auto-printing white-background HTML report in a new tab."""
+def show_print_link(title, subtitle, html_table_content):
+    # Strip newlines from content to prevent syntax errors in the JS string
+    clean_content = "".join([line.strip() for line in html_table_content.split("\n")])
+    
     html_template = f"""<!DOCTYPE html>
 <html>
 <head>
@@ -1075,28 +1077,33 @@ def get_printable_html_link(title, subtitle, html_table_content):
             font-family: monospace; font-weight: bold; cursor: pointer;
         ">PRINT</button>
     </div>
-    {html_table_content}
+    {clean_content}
 </body>
 </html>"""
+    
     b64 = base64.b64encode(html_template.encode("utf-8")).decode("utf-8")
-    return f"data:text/html;base64,{b64}"
-
-def show_print_link(title, subtitle, html_table_content):
-    href = get_printable_html_link(title, subtitle, html_table_content)
+    
+    # Render interactive button that opens an empty tab and writes the decoded HTML string to it
     st.markdown(
-        f'<a href="{href}" target="_blank" style="'
-        f'text-decoration: none;'
-        f'background-color: #f5a623;'
-        f'color: #07090d;'
-        f'border: none;'
-        f'padding: 8px 16px;'
-        f'font-family: monospace;'
-        f'font-weight: bold;'
-        f'cursor: pointer;'
-        f'border-radius: 2px;'
-        f'display: inline-block;'
-        f'margin-bottom: 15px;'
-        f'">🖨️ Print / Save PDF</a>',
+        f"""
+        <button onclick="
+            var w = window.open('', '_blank');
+            w.document.write(decodeURIComponent(escape(window.atob('{b64}'))));
+            w.document.close();
+        " style="
+            text-decoration: none;
+            background-color: #f5a623;
+            color: #07090d;
+            border: none;
+            padding: 8px 16px;
+            font-family: monospace;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 2px;
+            display: inline-block;
+            margin-bottom: 15px;
+        ">🖨️ Print / Save PDF</button>
+        """,
         unsafe_allow_html=True
     )
 
