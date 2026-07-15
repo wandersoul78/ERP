@@ -1,0 +1,7 @@
+﻿# .gitignore for ERP Ledger
+ledger.db
+service_account.json
+.streamlit/secrets.toml
+__pycache__/
+*.pyc
+*.pyw.bak
