@@ -995,7 +995,7 @@ def page_vouchers():
 import base64
 
 def show_print_link(title, subtitle, html_table_content):
-    # Strip newlines from content to prevent syntax errors in the JS string
+    # Strip newlines from content to prevent syntax errors
     clean_content = "".join([line.strip() for line in html_table_content.split("\n")])
     
     html_template = f"""<!DOCTYPE html>
@@ -1081,30 +1081,15 @@ def show_print_link(title, subtitle, html_table_content):
 </body>
 </html>"""
     
-    b64 = base64.b64encode(html_template.encode("utf-8")).decode("utf-8")
+    filename = f"{title.replace(' ', '_').lower()}.html"
     
-    # Render interactive button that opens an empty tab and writes the decoded HTML string to it
-    st.markdown(
-        f"""
-        <button onclick="
-            var w = window.open('', '_blank');
-            w.document.write(decodeURIComponent(escape(window.atob('{b64}'))));
-            w.document.close();
-        " style="
-            text-decoration: none;
-            background-color: #f5a623;
-            color: #07090d;
-            border: none;
-            padding: 8px 16px;
-            font-family: monospace;
-            font-weight: bold;
-            cursor: pointer;
-            border-radius: 2px;
-            display: inline-block;
-            margin-bottom: 15px;
-        ">🖨️ Print / Save PDF</button>
-        """,
-        unsafe_allow_html=True
+    # Render native Streamlit download button
+    st.download_button(
+        label="📥 Download & Print Report",
+        data=html_template,
+        file_name=filename,
+        mime="text/html",
+        key=f"dl_btn_{title.replace(' ', '_').lower()}_{subtitle.replace(' ', '_').lower()}"
     )
 
 INLINE_CSS = """
