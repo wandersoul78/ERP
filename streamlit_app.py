@@ -26,6 +26,9 @@ SCOPES = [
 @st.cache_resource(show_spinner="Connecting to Google Sheets…")
 def get_spreadsheet():
     creds_info = dict(st.secrets["gcp_service_account"])
+    # TOML stores \n as literal backslash-n; RSA key needs real newlines.
+    if "private_key" in creds_info:
+        creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
     creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
     gc = gspread.authorize(creds)
     return gc.open(SHEET_NAME)
