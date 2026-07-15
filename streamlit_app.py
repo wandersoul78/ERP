@@ -9,6 +9,7 @@ Deploy to Streamlit Cloud. Add credentials in st.secrets.
 import streamlit as st
 import gspread
 import pandas as pd
+import json
 from datetime import date, datetime
 from google.oauth2.service_account import Credentials
 
@@ -20,18 +21,70 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+# Tab headers (must match sheets_sync.py)
+TABS = {
+    "Accounts":    ["ID", "Name", "Type", "Opening Balance", "Opening Side"],
+    "Items":       ["ID", "Name", "Unit", "Opening Qty", "Opening Rate"],
+    "Vouchers":    ["ID", "Date", "Type", "Reference", "Narration", "Created At"],
+    "Entries":     ["ID", "Voucher ID", "Account ID", "Account Name", "Debit", "Credit"],
+    "Stock Lines": ["ID", "Voucher ID", "Item ID", "Item Name", "Direction", "Qty", "Rate", "GST Rate"],
+}
+
 # ================================================================
 #  CONNECTION
 # ================================================================
 @st.cache_resource(show_spinner="Connecting to Google Sheets…")
 def get_spreadsheet():
-    creds_info = dict(st.secrets["gcp_service_account"])
-    # TOML stores \n as literal backslash-n; RSA key needs real newlines.
-    if "private_key" in creds_info:
-        creds_info["private_key"] = creds_info["private_key"].replace("\\n", "\n")
+    """
+    Supports two secrets formats (try format 1 first — it is 100% reliable):
+
+    Format 1 — Recommended: paste the ENTIRE service_account.json as a string
+        service_account_json = '{"type":"service_account","project_id":"..."}'
+
+    Format 2 — Individual TOML fields under [gcp_service_account]
+        [gcp_service_account]
+        type = "service_account"  ...etc
+
+    The spreadsheet is auto-created if it doesn't exist yet.
+    No need to create a sheet manually or provide a Sheet ID.
+    """
+    if "service_account_json" in st.secrets:
+        creds_info = json.loads(st.secrets["service_account_json"])
+    else:
+        creds_info = dict(st.secrets["gcp_service_account"])
+        key = creds_info.get("private_key", "")
+        key = key.replace("\\n", "\n")
+        key = key.replace("\r\n", "\n").replace("\r", "\n")
+        if not key.endswith("\n"):
+            key += "\n"
+        creds_info["private_key"] = key
+
     creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    return gc.open(SHEET_NAME)
+    gc    = gspread.authorize(creds)
+
+    # ── Open existing sheet or create a new one ───────────────────
+    try:
+        ss = gc.open(SHEET_NAME)
+    except gspread.SpreadsheetNotFound:
+        ss = gc.create(SHEET_NAME)
+        # Share as viewer with anyone who has the link
+        ss.share(None, perm_type="anyone", role="reader")
+
+    # ── Ensure all required tabs exist ────────────────────────────
+    existing = {ws.title for ws in ss.worksheets()}
+    for tab, headers in TABS.items():
+        if tab not in existing:
+            ws = ss.add_worksheet(title=tab, rows=5000, cols=len(headers) + 2)
+            ws.update([headers])
+
+    # Remove default "Sheet1" if present
+    if "Sheet1" in existing:
+        try:
+            ss.del_worksheet(ss.worksheet("Sheet1"))
+        except Exception:
+            pass
+
+    return ss
 
 # ================================================================
 #  DATA LOADING  (session-state cache, refresh on demand)
@@ -79,6 +132,16 @@ def _delete_rows_where(tab: str, col: str, value):
     idxs = [i + 2 for i, r in enumerate(records) if str(r.get(col, "")) == str(value)]
     for idx in reversed(idxs):
         ws.delete_rows(idx)
+
+def _update_row_where(tab: str, col_id: str, id_val, new_values: list):
+    ws = _ws(tab)
+    records = ws.get_all_records()
+    for i, r in enumerate(records):
+        if str(r.get(col_id, "")) == str(id_val):
+            row_idx = i + 2
+            col_letter = chr(ord('A') + len(new_values) - 1)
+            ws.update(range_name=f"A{row_idx}:{col_letter}{row_idx}", values=[new_values], value_input_option="USER_ENTERED")
+            break
 
 # ================================================================
 #  REPORT COMPUTATIONS
@@ -269,6 +332,44 @@ def page_accounts():
                     st.success(f"Account '{name}' created (ID {nid}).")
                     load_data(); st.rerun()
 
+    if not accs.empty:
+        with st.expander("✏️ Edit / Delete Account"):
+            acc_list = list(accs["Name"].values)
+            sel_acc_name = st.selectbox("Select Account to Modify", acc_list)
+            
+            acc_row = accs[accs["Name"] == sel_acc_name].iloc[0]
+            acc_id = int(acc_row["ID"])
+            
+            with st.form("f_edit_acc"):
+                new_name = st.text_input("Name", value=acc_row["Name"])
+                new_typ = st.selectbox("Type", ACCOUNT_TYPES, index=ACCOUNT_TYPES.index(acc_row["Type"]))
+                new_ob = st.number_input("Opening Balance", min_value=0.0, step=0.01, value=float(acc_row["Opening Balance"]), format="%.2f")
+                new_ob_side = st.radio("Opening Side", ["debit", "credit"], index=0 if acc_row["Opening Side"] == "debit" else 1, horizontal=True)
+                
+                c1, c2 = st.columns(2)
+                save_clicked = c1.form_submit_button("Save Changes")
+                delete_clicked = c2.form_submit_button("❌ Delete Account")
+                
+                if save_clicked:
+                    if not new_name.strip():
+                        st.error("Name required.")
+                    elif new_name.strip() != acc_row["Name"] and new_name.strip() in accs["Name"].values:
+                        st.error("Account name already exists.")
+                    else:
+                        _update_row_where("Accounts", "ID", acc_id, [acc_id, new_name.strip(), new_typ, new_ob, new_ob_side])
+                        st.success(f"Account '{new_name}' updated.")
+                        load_data(); st.rerun()
+                
+                if delete_clicked:
+                    ents = entries()
+                    used = not ents.empty and acc_id in ents["Account ID"].values
+                    if used:
+                        st.error("Cannot delete an account that has voucher entries.")
+                    else:
+                        _delete_rows_where("Accounts", "ID", acc_id)
+                        st.success(f"Account '{sel_acc_name}' deleted.")
+                        load_data(); st.rerun()
+
 # ── Items ─────────────────────────────────────────────────────────
 def page_items():
     st.title("📦 Items")
@@ -295,6 +396,44 @@ def page_items():
                     st.success(f"Item '{name}' created.")
                     load_data(); st.rerun()
 
+    if not it_df.empty:
+        with st.expander("✏️ Edit / Delete Item"):
+            it_names = list(it_df["Name"].values)
+            sel_it_name = st.selectbox("Select Item to Modify", it_names)
+            
+            it_row = it_df[it_df["Name"] == sel_it_name].iloc[0]
+            it_id = int(it_row["ID"])
+            
+            with st.form("f_edit_item"):
+                new_name = st.text_input("Name", value=it_row["Name"])
+                new_unit = st.text_input("Unit", value=it_row["Unit"])
+                new_oq   = st.number_input("Opening Qty", min_value=0.0, step=0.001, value=float(it_row["Opening Qty"]), format="%.3f")
+                new_or   = st.number_input("Opening Rate", min_value=0.0, step=0.01, value=float(it_row["Opening Rate"]), format="%.2f")
+                
+                c1, c2 = st.columns(2)
+                save_clicked = c1.form_submit_button("Save Changes")
+                delete_clicked = c2.form_submit_button("❌ Delete Item")
+                
+                if save_clicked:
+                    if not new_name.strip():
+                        st.error("Name required.")
+                    elif new_name.strip() != it_row["Name"] and new_name.strip() in it_df["Name"].values:
+                        st.error("Item name already exists.")
+                    else:
+                        _update_row_where("Items", "ID", it_id, [it_id, new_name.strip(), new_unit.strip() or "pcs", new_oq, new_or])
+                        st.success(f"Item '{new_name}' updated.")
+                        load_data(); st.rerun()
+                
+                if delete_clicked:
+                    sl_all = stock_lines()
+                    used = not sl_all.empty and it_id in sl_all["Item ID"].values
+                    if used:
+                        st.error("Cannot delete an item that has inventory movements.")
+                    else:
+                        _delete_rows_where("Items", "ID", it_id)
+                        st.success(f"Item '{sel_it_name}' deleted.")
+                        load_data(); st.rerun()
+
 # ── Vouchers ──────────────────────────────────────────────────────
 def page_vouchers():
     st.title("📑 Vouchers")
@@ -302,6 +441,7 @@ def page_vouchers():
     v_df = vouchers()
     e_df = entries()
     accs = accounts()
+    it_df = items()
 
     if not v_df.empty:
         st.subheader("Voucher List")
@@ -319,81 +459,288 @@ def page_vouchers():
         st.warning("No accounts found. Create accounts first.")
         return
 
-    acc_map  = {r["Name"]: r["ID"] for _, r in accs.iterrows()}
+    acc_map   = {r["Name"]: r["ID"] for _, r in accs.iterrows()}
     acc_names = list(acc_map.keys())
+    it_map    = {r["Name"]: r["ID"] for _, r in it_df.iterrows()} if not it_df.empty else {}
 
-    v_type    = st.selectbox("Type",      VOUCHER_TYPES)
-    v_date    = st.date_input("Date",     value=date.today())
+    # Initialize v_type in session state to handle change detection properly
+    if "v_type_val" not in st.session_state:
+        st.session_state["v_type_val"] = "sales"
+
+    v_type    = st.selectbox("Type", VOUCHER_TYPES, key="v_type_val")
+    v_date    = st.date_input("Date",        value=date.today())
     reference = st.text_input("Reference No.")
     narration = st.text_input("Narration")
 
-    if v_type == "production":
-        st.info("Production vouchers: record stock movements (In/Out) only.")
-        it_df  = items()
+    # Detect voucher type changes to reset and pre-populate states
+    if "v_type_prev" not in st.session_state:
+        st.session_state["v_type_prev"] = v_type
+        # Clear entries & inv row keys
+        st.session_state.pop("n_rows", None)
+        st.session_state.pop("inv_rows", None)
+        st.session_state.pop("show_stock_v_val", None)
+    elif st.session_state["v_type_prev"] != v_type:
+        st.session_state["v_type_prev"] = v_type
+        # Clean up dynamically created session state row variables
+        for i in range(st.session_state.get("n_rows", 2)):
+            st.session_state.pop(f"v_acc_{i}", None)
+            st.session_state.pop(f"v_side_{i}", None)
+            st.session_state.pop(f"v_amt_{i}", None)
+        for j in range(st.session_state.get("inv_rows", 1)):
+            st.session_state.pop(f"v_item_{j}", None)
+            st.session_state.pop(f"v_dir_{j}", None)
+            st.session_state.pop(f"v_qty_{j}", None)
+            st.session_state.pop(f"v_rate_{j}", None)
+            st.session_state.pop(f"v_gst_{j}", None)
+        st.session_state.pop("n_rows", None)
+        st.session_state.pop("inv_rows", None)
+        st.session_state.pop("show_stock_v_val", None)
+        st.session_state.pop("auto_sync_amounts", None)
+
+    # Initialize defaults if not present
+    if "n_rows" not in st.session_state:
+        st.session_state.n_rows = 2
+    if "inv_rows" not in st.session_state:
+        st.session_state.inv_rows = 1 if v_type in ("sales", "purchase", "production") and not it_df.empty else 0
+    if "show_stock_v_val" not in st.session_state:
+        st.session_state.show_stock_v_val = v_type in ("sales", "purchase")
+
+    # Set up defaults for ledger rows
+    for i in range(st.session_state.n_rows):
+        acc_key = f"v_acc_{i}"
+        side_key = f"v_side_{i}"
+        amt_key = f"v_amt_{i}"
+
+        if acc_key not in st.session_state:
+            if v_type == "sales":
+                if i == 0:
+                    cash_idx = next((idx for idx, name in enumerate(acc_names) if name.lower() == "cash"), 0)
+                    st.session_state[acc_key] = acc_names[cash_idx]
+                elif i == 1:
+                    sales_idx = next((idx for idx, name in enumerate(acc_names) if name.lower() == "sales"), 0)
+                    st.session_state[acc_key] = acc_names[sales_idx]
+                else:
+                    st.session_state[acc_key] = acc_names[0]
+            elif v_type == "purchase":
+                if i == 0:
+                    p_idx = next((idx for idx, name in enumerate(acc_names) if name.lower() == "purchases"), 0)
+                    st.session_state[acc_key] = acc_names[p_idx]
+                elif i == 1:
+                    cash_idx = next((idx for idx, name in enumerate(acc_names) if name.lower() == "cash"), 0)
+                    st.session_state[acc_key] = acc_names[cash_idx]
+                else:
+                    st.session_state[acc_key] = acc_names[0]
+            else:
+                st.session_state[acc_key] = acc_names[min(i, len(acc_names)-1)]
+
+        if side_key not in st.session_state:
+            if v_type in ("sales", "purchase"):
+                st.session_state[side_key] = "Debit" if i == 0 else "Credit"
+            else:
+                st.session_state[side_key] = "Debit" if i % 2 == 0 else "Credit"
+
+        if amt_key not in st.session_state:
+            st.session_state[amt_key] = 0.0
+
+    # Set up defaults for inventory rows
+    if not it_df.empty:
+        for j in range(st.session_state.inv_rows):
+            item_key = f"v_item_{j}"
+            dir_key  = f"v_dir_{j}"
+            qty_key  = f"v_qty_{j}"
+            rate_key = f"v_rate_{j}"
+            gst_key  = f"v_gst_{j}"
+
+            if item_key not in st.session_state:
+                st.session_state[item_key] = list(it_map.keys())[0]
+            if dir_key not in st.session_state:
+                st.session_state[dir_key] = "out" if v_type == "sales" else "in"
+            if qty_key not in st.session_state:
+                st.session_state[qty_key] = 0.0
+            if rate_key not in st.session_state:
+                st.session_state[rate_key] = 0.0
+            if gst_key not in st.session_state:
+                st.session_state[gst_key] = 0.0
+
+    # Calculate inventory total for auto-fill functionality
+    is_prod = v_type == "production"
+    show_stock = is_prod or st.session_state.show_stock_v_val
+
+    inv_total = 0.0
+    if show_stock and not it_df.empty:
+        for j in range(st.session_state.inv_rows):
+            qty  = st.session_state.get(f"v_qty_{j}", 0.0)
+            rate = st.session_state.get(f"v_rate_{j}", 0.0)
+            gst  = st.session_state.get(f"v_gst_{j}", 0.0)
+            inv_total += qty * rate * (1 + gst / 100)
+
+    # Auto-sync ledger amounts from inventory if checkbox is checked
+    if v_type in ("sales", "purchase") and show_stock:
+        if "auto_sync_amounts" not in st.session_state:
+            st.session_state.auto_sync_amounts = True
+        
+        # If enabled and we have inventory lines total, force set amounts of first two rows
+        if st.session_state.auto_sync_amounts and inv_total > 0:
+            if st.session_state.n_rows >= 2:
+                st.session_state["v_amt_0"] = round(inv_total, 2)
+                st.session_state["v_amt_1"] = round(inv_total, 2)
+
+    # ── PRODUCTION: only stock movements ──────────────────────────
+    if is_prod:
+        st.markdown("**Stock Movements** (In / Out)")
         if it_df.empty:
             st.warning("No items found. Add items first."); return
-        it_map  = {r["Name"]: r["ID"] for _, r in it_df.iterrows()}
-
-        if "prod_rows" not in st.session_state:
-            st.session_state.prod_rows = 1
 
         stock_entries = []
-        for i in range(st.session_state.prod_rows):
+        for j in range(st.session_state.inv_rows):
             c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
-            itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"pi_{i}")
-            dire = c2.selectbox("Direction", ["in", "out"],        key=f"pd_{i}")
-            qty  = c3.number_input("Qty",  min_value=0.001, step=0.001, key=f"pq_{i}", format="%.3f")
-            rate = c4.number_input("Rate", min_value=0.0,   step=0.01,  key=f"pr_{i}", format="%.2f")
+            itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"v_item_{j}")
+            dire = c2.selectbox("Direction", ["in", "out"],        key=f"v_dir_{j}")
+            qty  = c3.number_input("Qty",  min_value=0.001, step=0.001, key=f"v_qty_{j}", format="%.3f")
+            rate = c4.number_input("Rate", min_value=0.0,   step=0.01,  key=f"v_rate_{j}", format="%.2f")
             stock_entries.append({"item_id": it_map[itm], "item_name": itm,
                                    "direction": dire, "qty": qty, "rate": rate, "gst_rate": 0})
 
         col1, col2 = st.columns(2)
-        if col1.button("+ Row", key="prod_add"): st.session_state.prod_rows += 1; st.rerun()
-        if col2.button("- Row", key="prod_rm") and st.session_state.prod_rows > 1:
-            st.session_state.prod_rows -= 1; st.rerun()
+        if col1.button("+ Row", key="prod_add"):
+            st.session_state.inv_rows += 1
+            j = st.session_state.inv_rows - 1
+            st.session_state[f"v_item_{j}"] = list(it_map.keys())[0]
+            st.session_state[f"v_dir_{j}"] = "in"
+            st.session_state[f"v_qty_{j}"] = 0.0
+            st.session_state[f"v_rate_{j}"] = 0.0
+            st.session_state[f"v_gst_{j}"] = 0.0
+            st.rerun()
+        if col2.button("- Row", key="prod_rm") and st.session_state.inv_rows > 1:
+            j = st.session_state.inv_rows - 1
+            st.session_state.pop(f"v_item_{j}", None)
+            st.session_state.pop(f"v_dir_{j}", None)
+            st.session_state.pop(f"v_qty_{j}", None)
+            st.session_state.pop(f"v_rate_{j}", None)
+            st.session_state.pop(f"v_gst_{j}", None)
+            st.session_state.inv_rows -= 1
+            st.rerun()
 
         if st.button("✅ Save Production Voucher", type="primary"):
-            v_id   = _next_id(v_df)
-            sl_all = stock_lines()
-            sl_id  = _next_id(sl_all)
+            v_id  = _next_id(v_df)
+            sl_id = _next_id(stock_lines())
             _append("Vouchers", [v_id, str(v_date), v_type, reference, narration, datetime.now().isoformat()])
             for i, s in enumerate(stock_entries):
                 _append("Stock Lines", [sl_id+i, v_id, s["item_id"], s["item_name"],
                                         s["direction"], s["qty"], s["rate"], s["gst_rate"]])
             st.success(f"Production voucher #{v_id} saved.")
-            del st.session_state["prod_rows"]
+            # Clear state
+            for j in range(st.session_state.inv_rows):
+                st.session_state.pop(f"v_item_{j}", None)
+                st.session_state.pop(f"v_dir_{j}", None)
+                st.session_state.pop(f"v_qty_{j}", None)
+                st.session_state.pop(f"v_rate_{j}", None)
+                st.session_state.pop(f"v_gst_{j}", None)
+            st.session_state.pop("inv_rows", None)
             load_data(); st.rerun()
 
+    # ── ALL OTHER TYPES: ledger entries + optional inventory ───────
     else:
-        st.write("**Ledger Entries** — debit total must equal credit total")
+        # ── Section 1: Ledger entries ──────────────────────────────
+        st.markdown("**Ledger Entries** — one side per row, debit total must equal credit total")
 
-        if "n_rows" not in st.session_state:
-            st.session_state.n_rows = 2
+        # Checkbox to let the user auto-sync ledger amounts from inventory
+        if v_type in ("sales", "purchase") and show_stock:
+            st.checkbox("Auto-sync ledger amounts from inventory total", key="auto_sync_amounts")
 
         entry_data = []
         for i in range(st.session_state.n_rows):
-            c1, c2, c3 = st.columns([3, 2, 2])
-            acc = c1.selectbox("Account", acc_names, key=f"ea_{i}")
-            dr  = c2.number_input("Debit",  min_value=0.0, step=0.01, key=f"ed_{i}", format="%.2f")
-            cr  = c3.number_input("Credit", min_value=0.0, step=0.01, key=f"ec_{i}", format="%.2f")
+            c1, c2, c3 = st.columns([4, 2, 2])
+            acc  = c1.selectbox("Account", acc_names, key=f"v_acc_{i}")
+            side = c2.selectbox("Side", ["Debit", "Credit"], key=f"v_side_{i}")
+            amt  = c3.number_input("Amount", min_value=0.0, step=0.01, key=f"v_amt_{i}", format="%.2f")
+            dr = amt if side == "Debit"  else 0.0
+            cr = amt if side == "Credit" else 0.0
             entry_data.append({"account_id": acc_map[acc], "account_name": acc, "debit": dr, "credit": cr})
 
         col1, col2 = st.columns(2)
-        if col1.button("+ Row"): st.session_state.n_rows += 1; st.rerun()
-        if col2.button("- Row") and st.session_state.n_rows > 2:
-            st.session_state.n_rows -= 1; st.rerun()
+        if col1.button("+ Ledger Row"):
+            st.session_state.n_rows += 1
+            i = st.session_state.n_rows - 1
+            st.session_state[f"v_acc_{i}"] = acc_names[0]
+            st.session_state[f"v_side_{i}"] = "Credit" if i % 2 == 1 else "Debit"
+            st.session_state[f"v_amt_{i}"] = 0.0
+            st.rerun()
+        if col2.button("- Ledger Row") and st.session_state.n_rows > 2:
+            i = st.session_state.n_rows - 1
+            st.session_state.pop(f"v_acc_{i}", None)
+            st.session_state.pop(f"v_side_{i}", None)
+            st.session_state.pop(f"v_amt_{i}", None)
+            st.session_state.n_rows -= 1
+            st.rerun()
 
-        total_dr = sum(e["debit"]  for e in entry_data)
-        total_cr = sum(e["credit"] for e in entry_data)
-        bal_ok   = round(total_dr, 2) == round(total_cr, 2) and total_dr > 0
+        total_dr = round(sum(e["debit"]  for e in entry_data), 2)
+        total_cr = round(sum(e["credit"] for e in entry_data), 2)
+        bal_ok   = total_dr == total_cr and total_dr > 0
 
-        bal_col = "normal" if bal_ok else "inverse"
-        st.metric("Total Debit", f"₹{total_dr:,.2f}", delta=f"Cr: ₹{total_cr:,.2f}",
-                  delta_color=("normal" if bal_ok else "inverse"))
+        bal_color = "green" if bal_ok else "red"
+        st.markdown(
+            f"<span style='color:{bal_color};font-weight:600'>"
+            f"Dr ₹{total_dr:,.2f}  |  Cr ₹{total_cr:,.2f}"
+            f"{'  ✅ Balanced' if bal_ok else '  ⚠️ Not balanced'}</span>",
+            unsafe_allow_html=True,
+        )
 
+        # ── Section 2: Inventory movements (optional) ─────────────
+        st.markdown("---")
+        st.checkbox("Include inventory movement (items in/out)", key="show_stock_v_val")
+
+        stock_entries = []
+        if show_stock:
+            if it_df.empty:
+                st.warning("No items found. Add items first.")
+            else:
+                st.markdown("**Inventory Movement**")
+
+                for j in range(st.session_state.inv_rows):
+                    c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
+                    itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"v_item_{j}")
+                    dire = c2.selectbox("Direction", ["in", "out"],        key=f"v_dir_{j}")
+                    qty  = c3.number_input("Qty",      min_value=0.001, step=0.001, key=f"v_qty_{j}", format="%.3f")
+                    rate = c4.number_input("Rate",     min_value=0.0,   step=0.01,  key=f"v_rate_{j}", format="%.2f")
+                    gst  = c5.number_input("GST %",   min_value=0.0,   step=0.5,   key=f"v_gst_{j}", format="%.1f")
+                    stock_entries.append({"item_id": it_map[itm], "item_name": itm,
+                                          "direction": dire, "qty": qty, "rate": rate, "gst_rate": gst})
+
+                ic1, ic2 = st.columns(2)
+                if ic1.button("+ Item Row"):
+                    st.session_state.inv_rows += 1
+                    j = st.session_state.inv_rows - 1
+                    st.session_state[f"v_item_{j}"] = list(it_map.keys())[0]
+                    st.session_state[f"v_dir_{j}"] = "out" if v_type == "sales" else "in"
+                    st.session_state[f"v_qty_{j}"] = 0.0
+                    st.session_state[f"v_rate_{j}"] = 0.0
+                    st.session_state[f"v_gst_{j}"] = 0.0
+                    st.rerun()
+                if ic2.button("- Item Row") and st.session_state.inv_rows > 1:
+                    j = st.session_state.inv_rows - 1
+                    st.session_state.pop(f"v_item_{j}", None)
+                    st.session_state.pop(f"v_dir_{j}", None)
+                    st.session_state.pop(f"v_qty_{j}", None)
+                    st.session_state.pop(f"v_rate_{j}", None)
+                    st.session_state.pop(f"v_gst_{j}", None)
+                    st.session_state.inv_rows -= 1
+                    st.rerun()
+        else:
+            # Clear inv_rows keys when section is hidden
+            for j in range(st.session_state.get("inv_rows", 1)):
+                st.session_state.pop(f"v_item_{j}", None)
+                st.session_state.pop(f"v_dir_{j}", None)
+                st.session_state.pop(f"v_qty_{j}", None)
+                st.session_state.pop(f"v_rate_{j}", None)
+                st.session_state.pop(f"v_gst_{j}", None)
+            st.session_state.pop("inv_rows", None)
+
+        st.markdown("---")
         if st.button("✅ Save Voucher", type="primary", disabled=not bal_ok):
-            v_id   = _next_id(v_df)
-            e_id   = _next_id(e_df)
+            v_id  = _next_id(v_df)
+            e_id  = _next_id(e_df)
+            sl_id = _next_id(stock_lines())
             _append("Vouchers", [v_id, str(v_date), v_type, reference, narration, datetime.now().isoformat()])
             ei = 0
             for e in entry_data:
@@ -401,12 +748,423 @@ def page_vouchers():
                     _append("Entries", [e_id+ei, v_id, e["account_id"], e["account_name"],
                                         e["debit"], e["credit"]])
                     ei += 1
+            for i, s in enumerate(stock_entries):
+                _append("Stock Lines", [sl_id+i, v_id, s["item_id"], s["item_name"],
+                                        s["direction"], s["qty"], s["rate"], s["gst_rate"]])
             st.success(f"Voucher #{v_id} saved!")
-            del st.session_state["n_rows"]
+            # Clear session state
+            for i in range(st.session_state.n_rows):
+                st.session_state.pop(f"v_acc_{i}", None)
+                st.session_state.pop(f"v_side_{i}", None)
+                st.session_state.pop(f"v_amt_{i}", None)
+            for j in range(st.session_state.get("inv_rows", 1)):
+                st.session_state.pop(f"v_item_{j}", None)
+                st.session_state.pop(f"v_dir_{j}", None)
+                st.session_state.pop(f"v_qty_{j}", None)
+                st.session_state.pop(f"v_rate_{j}", None)
+                st.session_state.pop(f"v_gst_{j}", None)
+            st.session_state.pop("n_rows", None)
+            st.session_state.pop("inv_rows", None)
+            st.session_state.pop("show_stock_v_val", None)
+            st.session_state.pop("auto_sync_amounts", None)
             load_data(); st.rerun()
 
         if not bal_ok and total_dr > 0:
             st.error(f"Entries don't balance: Dr ₹{total_dr:,.2f} vs Cr ₹{total_cr:,.2f}")
+
+    if not v_df.empty:
+        st.divider()
+        with st.expander("✏️ Modify / Delete Existing Voucher"):
+            # Select voucher
+            v_options = [f"#{r['ID']} - {r['Type'].upper()} - {r['Date']} ({r['Narration'][:30]})" for _, r in v_df.iterrows()]
+            sel_v_option = st.selectbox("Select Voucher to Modify", v_options)
+            
+            # Extract voucher ID
+            sel_v_id = int(sel_v_option.split(" ")[0][1:])
+            v_row = v_df[v_df["ID"] == sel_v_id].iloc[0]
+            
+            st.write(f"Modifying Voucher **#{sel_v_id}**")
+            
+            # Local helper to initialize/force edit voucher state in session state keys
+            def init_edit_voucher_state(v_id, v_r, e_d, sl_all, force=False):
+                v_ents = e_d[e_d["Voucher ID"] == v_id] if not e_d.empty else pd.DataFrame()
+                v_sl = sl_all[sl_all["Voucher ID"] == v_id] if not sl_all.empty else pd.DataFrame()
+                
+                n_rows_key = f"ev_n_rows_{v_id}"
+                inv_rows_key = f"ev_inv_rows_{v_id}"
+                
+                if n_rows_key not in st.session_state or force:
+                    st.session_state[n_rows_key] = len(v_ents) if not v_ents.empty else 0
+                if inv_rows_key not in st.session_state or force:
+                    st.session_state[inv_rows_key] = len(v_sl) if not v_sl.empty else 0
+
+                if not v_ents.empty:
+                    for i, (_, r) in enumerate(v_ents.iterrows()):
+                        acc_key = f"ev_acc_{v_id}_{i}"
+                        side_key = f"ev_side_{v_id}_{i}"
+                        amt_key = f"ev_amt_{v_id}_{i}"
+                        
+                        if acc_key not in st.session_state or force:
+                            st.session_state[acc_key] = r["Account Name"]
+                        if side_key not in st.session_state or force:
+                            st.session_state[side_key] = "Debit" if float(r["Debit"]) > 0 else "Credit"
+                        if amt_key not in st.session_state or force:
+                            st.session_state[amt_key] = float(r["Debit"]) if float(r["Debit"]) > 0 else float(r["Credit"])
+
+                if not v_sl.empty:
+                    for j, (_, r) in enumerate(v_sl.iterrows()):
+                        item_key = f"ev_item_{v_id}_{j}"
+                        dir_key  = f"ev_dir_{v_id}_{j}"
+                        qty_key  = f"ev_qty_{v_id}_{j}"
+                        rate_key = f"ev_rate_{v_id}_{j}"
+                        gst_key  = f"ev_gst_{v_id}_{j}"
+                        
+                        if item_key not in st.session_state or force:
+                            st.session_state[item_key] = r["Item Name"]
+                        if dir_key not in st.session_state or force:
+                            st.session_state[dir_key] = r["Direction"]
+                        if qty_key not in st.session_state or force:
+                            st.session_state[qty_key] = float(r["Qty"])
+                        if rate_key not in st.session_state or force:
+                            st.session_state[rate_key] = float(r["Rate"])
+                        if gst_key not in st.session_state or force:
+                            st.session_state[gst_key] = float(r.get("GST Rate", 0) or 0)
+
+            # Change detection to load correct voucher state
+            if "ev_sel_id_prev" not in st.session_state:
+                st.session_state.ev_sel_id_prev = sel_v_id
+                init_edit_voucher_state(sel_v_id, v_row, e_df, stock_lines(), force=True)
+            elif st.session_state.ev_sel_id_prev != sel_v_id:
+                st.session_state.ev_sel_id_prev = sel_v_id
+                init_edit_voucher_state(sel_v_id, v_row, e_df, stock_lines(), force=True)
+
+            ev_date = st.date_input("Date", value=datetime.strptime(str(v_row["Date"]), "%Y-%m-%d").date(), key=f"ev_date_val_{sel_v_id}")
+            ev_ref  = st.text_input("Reference No.", value=str(v_row["Reference"]) if pd.notna(v_row["Reference"]) else "", key=f"ev_ref_val_{sel_v_id}")
+            ev_nar  = st.text_input("Narration", value=str(v_row["Narration"]) if pd.notna(v_row["Narration"]) else "", key=f"ev_nar_val_{sel_v_id}")
+
+            # ── Edit Section 1: Ledger Entries ─────────────────────────
+            is_prod = v_row["Type"] == "production"
+            ev_entries_data = []
+            
+            if not is_prod:
+                st.markdown("**Ledger Entries** — debit total must equal credit total")
+                ev_n_rows = st.session_state[f"ev_n_rows_{sel_v_id}"]
+                
+                for i in range(ev_n_rows):
+                    c1, c2, c3 = st.columns([4, 2, 2])
+                    acc  = c1.selectbox("Account", acc_names, key=f"ev_acc_{sel_v_id}_{i}")
+                    side = c2.selectbox("Side", ["Debit", "Credit"], key=f"ev_side_{sel_v_id}_{i}")
+                    amt  = c3.number_input("Amount", min_value=0.0, step=0.01, key=f"ev_amt_{sel_v_id}_{i}", format="%.2f")
+                    dr = amt if side == "Debit"  else 0.0
+                    cr = amt if side == "Credit" else 0.0
+                    ev_entries_data.append({"account_id": acc_map[acc], "account_name": acc, "debit": dr, "credit": cr})
+                
+                col1, col2 = st.columns(2)
+                if col1.button("+ Edit Ledger Row", key=f"ev_add_dr_{sel_v_id}"):
+                    st.session_state[f"ev_n_rows_{sel_v_id}"] += 1
+                    i = st.session_state[f"ev_n_rows_{sel_v_id}"] - 1
+                    st.session_state[f"ev_acc_{sel_v_id}_{i}"] = acc_names[0]
+                    st.session_state[f"ev_side_{sel_v_id}_{i}"] = "Credit" if i % 2 == 1 else "Debit"
+                    st.session_state[f"ev_amt_{sel_v_id}_{i}"] = 0.0
+                    st.rerun()
+                if col2.button("- Edit Ledger Row", key=f"ev_rm_dr_{sel_v_id}") and ev_n_rows > 2:
+                    i = st.session_state[f"ev_n_rows_{sel_v_id}"] - 1
+                    st.session_state.pop(f"ev_acc_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_side_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_amt_{sel_v_id}_{i}", None)
+                    st.session_state[f"ev_n_rows_{sel_v_id}"] -= 1
+                    st.rerun()
+
+            # ── Edit Section 2: Inventory Movements ────────────────────
+            ev_stock_entries = []
+            show_ev_stock = is_prod or v_row["Type"] in ("sales", "purchase")
+            
+            if show_ev_stock and not it_df.empty:
+                st.markdown("---")
+                st.markdown("**Inventory Movement**")
+                ev_inv_rows = st.session_state[f"ev_inv_rows_{sel_v_id}"]
+                
+                for j in range(ev_inv_rows):
+                    c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
+                    itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"ev_item_{sel_v_id}_{j}")
+                    dire = c2.selectbox("Direction", ["in", "out"],        key=f"ev_dir_{sel_v_id}_{j}")
+                    qty  = c3.number_input("Qty",      min_value=0.001, step=0.001, key=f"ev_qty_{sel_v_id}_{j}", format="%.3f")
+                    rate = c4.number_input("Rate",     min_value=0.0,   step=0.01,  key=f"ev_rate_{sel_v_id}_{j}", format="%.2f")
+                    gst  = c5.number_input("GST %",   min_value=0.0,   step=0.5,   key=f"ev_gst_{sel_v_id}_{j}", format="%.1f")
+                    ev_stock_entries.append({"item_id": it_map[itm], "item_name": itm,
+                                          "direction": dire, "qty": qty, "rate": rate, "gst_rate": gst})
+
+                ic1, ic2 = st.columns(2)
+                if ic1.button("+ Edit Item Row", key=f"ev_add_it_{sel_v_id}"):
+                    st.session_state[f"ev_inv_rows_{sel_v_id}"] += 1
+                    j = st.session_state[f"ev_inv_rows_{sel_v_id}"] - 1
+                    st.session_state[f"ev_item_{sel_v_id}_{j}"] = list(it_map.keys())[0]
+                    st.session_state[f"ev_dir_{sel_v_id}_{j}"] = "out" if v_row["Type"] == "sales" else "in"
+                    st.session_state[f"ev_qty_{sel_v_id}_{j}"] = 0.0
+                    st.session_state[f"ev_rate_{sel_v_id}_{j}"] = 0.0
+                    st.session_state[f"ev_gst_{sel_v_id}_{j}"] = 0.0
+                    st.rerun()
+                if ic2.button("- Edit Item Row", key=f"ev_rm_it_{sel_v_id}") and ev_inv_rows > (1 if is_prod else 0):
+                    j = st.session_state[f"ev_inv_rows_{sel_v_id}"] - 1
+                    st.session_state.pop(f"ev_item_{sel_v_id}_{j}", None)
+                    st.session_state.pop(f"ev_dir_{sel_v_id}_{j}", None)
+                    st.session_state.pop(f"ev_qty_{sel_v_id}_{j}", None)
+                    st.session_state.pop(f"ev_rate_{sel_v_id}_{j}", None)
+                    st.session_state.pop(f"ev_gst_{sel_v_id}_{j}", None)
+                    st.session_state[f"ev_inv_rows_{sel_v_id}"] -= 1
+                    st.rerun()
+
+            # Balance calculation and verification
+            total_dr = round(sum(e["debit"]  for e in ev_entries_data), 2)
+            total_cr = round(sum(e["credit"] for e in ev_entries_data), 2)
+            
+            if is_prod:
+                bal_ok = len(ev_stock_entries) > 0
+            else:
+                bal_ok = total_dr == total_cr and total_dr > 0
+
+            st.markdown("---")
+            c1, c2 = st.columns(2)
+            save_clicked   = c1.button("💾 Save Voucher Changes", type="primary", key=f"ev_save_btn_{sel_v_id}", disabled=not bal_ok)
+            delete_clicked = c2.button("❌ Delete Voucher Entirely", key=f"ev_del_btn_{sel_v_id}")
+
+            if save_clicked:
+                # 1. Update Vouchers worksheet
+                _update_row_where("Vouchers", "ID", sel_v_id, [sel_v_id, str(ev_date), v_row["Type"], ev_ref.strip(), ev_nar.strip(), v_row["Created At"]])
+                
+                # 2. Update Entries
+                _delete_rows_where("Entries", "Voucher ID", sel_v_id)
+                new_entries = []
+                next_e_id = _next_id(e_df)
+                for idx, e in enumerate(ev_entries_data):
+                    if e["debit"] > 0 or e["credit"] > 0:
+                        new_entries.append([next_e_id + idx, sel_v_id, e["account_id"], e["account_name"], e["debit"], e["credit"]])
+                if new_entries:
+                    _ws("Entries").append_rows(new_entries, value_input_option="USER_ENTERED")
+                    
+                # 3. Update Stock Lines
+                _delete_rows_where("Stock Lines", "Voucher ID", sel_v_id)
+                new_stock = []
+                next_sl_id = _next_id(stock_lines())
+                for idx, s in enumerate(ev_stock_entries):
+                    new_stock.append([next_sl_id + idx, sel_v_id, s["item_id"], s["item_name"], s["direction"], s["qty"], s["rate"], s["gst_rate"]])
+                if new_stock:
+                    _ws("Stock Lines").append_rows(new_stock, value_input_option="USER_ENTERED")
+                    
+                st.success(f"Voucher #{sel_v_id} updated successfully!")
+                
+                # Cleanup session states
+                st.session_state.pop(f"ev_n_rows_{sel_v_id}", None)
+                st.session_state.pop(f"ev_inv_rows_{sel_v_id}", None)
+                st.session_state.pop("ev_sel_id_prev", None)
+                for i in range(100):
+                    st.session_state.pop(f"ev_acc_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_side_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_amt_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_item_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_dir_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_qty_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_rate_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_gst_{sel_v_id}_{i}", None)
+                
+                load_data(); st.rerun()
+
+            if delete_clicked:
+                _delete_rows_where("Vouchers", "ID", sel_v_id)
+                _delete_rows_where("Entries", "Voucher ID", sel_v_id)
+                _delete_rows_where("Stock Lines", "Voucher ID", sel_v_id)
+                st.success(f"Voucher #{sel_v_id} deleted successfully.")
+                
+                # Cleanup session states
+                st.session_state.pop(f"ev_n_rows_{sel_v_id}", None)
+                st.session_state.pop(f"ev_inv_rows_{sel_v_id}", None)
+                st.session_state.pop("ev_sel_id_prev", None)
+                for i in range(100):
+                    st.session_state.pop(f"ev_acc_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_side_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_amt_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_item_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_dir_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_qty_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_rate_{sel_v_id}_{i}", None)
+                    st.session_state.pop(f"ev_gst_{sel_v_id}_{i}", None)
+                
+                load_data(); st.rerun()
+
+# ── PRINTING & REPORT HELPERS ──────────────────────────────────────
+import base64
+
+def get_printable_html_link(title, subtitle, html_table_content):
+    """Generates a base64 encoded data URI to trigger an auto-printing white-background HTML report in a new tab."""
+    html_template = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{title}</title>
+    <style>
+        body {{
+            font-family: 'Courier New', Courier, monospace;
+            color: #000;
+            background: #fff;
+            margin: 30px;
+            font-size: 13px;
+            line-height: 1.4;
+        }}
+        h1 {{
+            font-size: 18px;
+            margin: 0 0 4px 0;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .subtitle {{
+            font-size: 12px;
+            color: #333;
+            margin-bottom: 20px;
+            border-bottom: 2px solid #000;
+            padding-bottom: 10px;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+            margin-bottom: 20px;
+        }}
+        th {{
+            border-bottom: 2px solid #000;
+            border-top: 2px solid #000;
+            text-align: left;
+            padding: 6px 8px;
+            font-weight: bold;
+        }}
+        td {{
+            padding: 6px 8px;
+            border-bottom: 1px dashed #ccc;
+            vertical-align: top;
+            white-space: pre-line;
+        }}
+        .num {{
+            text-align: right;
+        }}
+        .total-row td {{
+            font-weight: bold;
+            border-top: 1.5px solid #000;
+            border-bottom: 2px double #000;
+        }}
+        .muted {{
+            color: #555;
+            font-size: 12px;
+        }}
+        .grid {{
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 40px;
+        }}
+        @media print {{
+            body {{ margin: 0; }}
+            .no-print {{ display: none !important; }}
+        }}
+    </style>
+</head>
+<body onload="window.print()">
+    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+        <div style="flex-grow: 1;">
+            <h1>{title}</h1>
+            <div class="subtitle">{subtitle}</div>
+        </div>
+        <button onclick="window.print()" class="no-print" style="
+            background: #000; color: #fff; border: none; padding: 6px 15px;
+            font-family: monospace; font-weight: bold; cursor: pointer;
+        ">PRINT</button>
+    </div>
+    {html_table_content}
+</body>
+</html>"""
+    b64 = base64.b64encode(html_template.encode("utf-8")).decode("utf-8")
+    return f"data:text/html;base64,{b64}"
+
+def show_print_link(title, subtitle, html_table_content):
+    href = get_printable_html_link(title, subtitle, html_table_content)
+    st.markdown(
+        f'<a href="{href}" target="_blank" style="'
+        f'text-decoration: none;'
+        f'background-color: #f5a623;'
+        f'color: #07090d;'
+        f'border: none;'
+        f'padding: 8px 16px;'
+        f'font-family: monospace;'
+        f'font-weight: bold;'
+        f'cursor: pointer;'
+        f'border-radius: 2px;'
+        f'display: inline-block;'
+        f'margin-bottom: 15px;'
+        f'">🖨️ Print / Save PDF</a>',
+        unsafe_allow_html=True
+    )
+
+INLINE_CSS = """
+<style>
+    .report-table-wrapper {
+        background-color: #0c0f16;
+        border: 1px solid #1f2937;
+        border-radius: 4px;
+        padding: 16px;
+        margin-bottom: 20px;
+    }
+    .report-table-wrapper table {
+        width: 100%;
+        border-collapse: collapse;
+        color: #d6e4f7;
+        font-family: monospace;
+        font-size: 13.5px;
+    }
+    .report-table-wrapper th {
+        border-bottom: 2px solid #374151;
+        text-align: left;
+        padding: 8px;
+        color: #f5a623;
+        font-weight: 600;
+    }
+    .report-table-wrapper td {
+        border-bottom: 1px dashed #1f2937;
+        padding: 8px;
+        vertical-align: top;
+        white-space: pre-line;
+    }
+    .report-table-wrapper tr.total-row td {
+        font-weight: bold;
+        border-top: 1.5px solid #374151;
+        border-bottom: 2px double #374151;
+    }
+    .report-table-wrapper .num {
+        text-align: right;
+    }
+    .report-table-wrapper .badge {
+        text-transform: uppercase;
+        font-size: 10px;
+        padding: 2px 6px;
+        background: #1e293b;
+        border-radius: 2px;
+        color: #f5a623;
+        font-weight: 600;
+    }
+    .report-table-wrapper .item-line {
+        color: #9ca3af;
+        font-size: 12px;
+        padding-top: 3px;
+        display: block;
+    }
+    .report-table-wrapper .grid-container {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 20px;
+    }
+    @media (max-width: 768px) {
+        .report-table-wrapper .grid-container {
+            grid-template-columns: 1fr;
+        }
+    }
+</style>
+"""
+
 
 # ── P&L ───────────────────────────────────────────────────────────
 def page_pl():
@@ -421,6 +1179,71 @@ def page_pl():
         to_d   = c2.date_input("To", value=date.today())
 
     income, expense, ti, te, np_ = compute_pl(from_d, to_d)
+    
+    # Format subtitle / range
+    subtitle_lbl = "All time"
+    if from_d and to_d: subtitle_lbl = f"Period: {from_d} to {to_d}"
+    elif from_d: subtitle_lbl = f"From {from_d} onward"
+    elif to_d: subtitle_lbl = f"Up to {to_d}"
+
+    # Build P&L HTML for both screen and printing
+    def build_pl_table_html(is_printable=False):
+        grid_class = "grid" if is_printable else "grid-container"
+        border_style = "border-bottom: 1px dashed #ccc;" if is_printable else "border-bottom: 1px dashed #1f2937;"
+        top_border = "border-top: 1.5px solid #000;" if is_printable else "border-top: 1.5px solid #374151;"
+        double_border = "border-top: 2px solid #000; border-bottom: 2px double #000;" if is_printable else "border-top: 2px solid #374151; border-bottom: 2px double #374151;"
+        
+        html = f"""
+        <div class="{grid_class}">
+            <div>
+                <h3 style="border-bottom: 2px solid {'#000' if is_printable else '#f5a623'}; padding-bottom: 5px; margin-bottom: 10px; text-transform: uppercase; font-size: 14px;">Income</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tbody>
+        """
+        for inc in income:
+            html += f"""
+                        <tr style="{border_style}">
+                            <td style="padding: 6px 8px;">{inc['Name']}</td>
+                            <td style="padding: 6px 8px; text-align: right;">{inc['Amount']:,.2f}</td>
+                        </tr>
+            """
+        html += f"""
+                        <tr style="font-weight: bold; {top_border}">
+                            <td style="padding: 6px 8px;">Total Income</td>
+                            <td style="padding: 6px 8px; text-align: right;">{ti:,.2f}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div>
+                <h3 style="border-bottom: 2px solid {'#000' if is_printable else '#f5a623'}; padding-bottom: 5px; margin-bottom: 10px; text-transform: uppercase; font-size: 14px;">Expenses</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tbody>
+        """
+        for exp in expense:
+            html += f"""
+                        <tr style="{border_style}">
+                            <td style="padding: 6px 8px;">{exp['Name']}</td>
+                            <td style="padding: 6px 8px; text-align: right;">{exp['Amount']:,.2f}</td>
+                        </tr>
+            """
+        html += f"""
+                        <tr style="font-weight: bold; {top_border}">
+                            <td style="padding: 6px 8px;">Total Expense</td>
+                            <td style="padding: 6px 8px; text-align: right;">{te:,.2f}</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        <div style="margin-top: 20px; padding: 10px; {double_border} font-size: 15px; font-weight: bold; text-align: right;">
+            Net {"Profit" if np_ >= 0 else "Loss"}: ₹{abs(np_):,.2f}
+        </div>
+        """
+        return html
+
+    show_print_link("Profit & Loss Statement", subtitle_lbl, build_pl_table_html(is_printable=True))
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Income",  f"₹{ti:,.2f}")
@@ -428,15 +1251,9 @@ def page_pl():
     c3.metric("Net Profit" if np_ >= 0 else "Net Loss", f"₹{abs(np_):,.2f}",
               delta=("Profit ✅" if np_ >= 0 else "Loss ❌"), delta_color="normal" if np_ >= 0 else "inverse")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Income")
-        if income: st.dataframe(pd.DataFrame(income), use_container_width=True, hide_index=True)
-        else: st.info("No income entries.")
-    with col2:
-        st.subheader("Expense")
-        if expense: st.dataframe(pd.DataFrame(expense), use_container_width=True, hide_index=True)
-        else: st.info("No expense entries.")
+    st.markdown(INLINE_CSS, unsafe_allow_html=True)
+    st.markdown(f'<div class="report-table-wrapper">{build_pl_table_html(is_printable=False)}</div>', unsafe_allow_html=True)
+
 
 # ── Balance Sheet ─────────────────────────────────────────────────
 def page_bs():
@@ -445,6 +1262,86 @@ def page_bs():
 
     as_of = st.date_input("As of", value=date.today())
     assets, liabs, eq_rows, np_, ta, tl, te = compute_bs(as_of)
+    
+    subtitle_lbl = f"As of {as_of}"
+
+    def build_bs_table_html(is_printable=False):
+        grid_class = "grid" if is_printable else "grid-container"
+        border_style = "border-bottom: 1px dashed #ccc;" if is_printable else "border-bottom: 1px dashed #1f2937;"
+        sub_border = "border-top: 1.5px solid #ccc;" if is_printable else "border-top: 1.5px solid #1f2937;"
+        double_border = "border-top: 2px solid #000; border-bottom: 2px double #000;" if is_printable else "border-top: 2px solid #374151; border-bottom: 2px double #374151;"
+        
+        html = f"""
+        <div class="{grid_class}">
+            <div>
+                <h3 style="border-bottom: 2px solid {'#000' if is_printable else '#f5a623'}; padding-bottom: 5px; margin-bottom: 10px; text-transform: uppercase; font-size: 14px;">Assets</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tbody>
+        """
+        for a in assets:
+            html += f"""
+                        <tr style="{border_style}">
+                            <td style="padding: 6px 8px;">{a['Name']}</td>
+                            <td style="padding: 6px 8px; text-align: right;">{a['Balance']:,.2f} Dr</td>
+                        </tr>
+            """
+        html += f"""
+                        <tr style="font-weight: bold; {double_border}">
+                            <td style="padding: 6px 8px;">Total Assets</td>
+                            <td style="padding: 6px 8px; text-align: right;">{ta:,.2f} Dr</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            
+            <div>
+                <h3 style="border-bottom: 2px solid {'#000' if is_printable else '#f5a623'}; padding-bottom: 5px; margin-bottom: 10px; text-transform: uppercase; font-size: 14px;">Liabilities & Equity</h3>
+                <table style="width: 100%; border-collapse: collapse;">
+                    <tbody>
+                        <tr><td colspan="2" style="font-weight: bold; padding: 4px 8px; text-decoration: underline; font-size: 11px;">LIABILITIES</td></tr>
+        """
+        for l in liabs:
+            html += f"""
+                        <tr style="{border_style}">
+                            <td style="padding: 6px 8px; padding-left: 20px;">{l['Name']}</td>
+                            <td style="padding: 6px 8px; text-align: right;">{l['Balance']:,.2f} Cr</td>
+                        </tr>
+            """
+        html += f"""
+                        <tr style="font-weight: bold; {sub_border}">
+                            <td style="padding: 6px 8px;">Total Liabilities</td>
+                            <td style="padding: 6px 8px; text-align: right;">{tl:,.2f} Cr</td>
+                        </tr>
+                        <tr><td colspan="2" style="font-weight: bold; padding: 12px 8px 4px; text-decoration: underline; font-size: 11px;">EQUITY</td></tr>
+        """
+        for eq in eq_rows:
+            html += f"""
+                        <tr style="{border_style}">
+                            <td style="padding: 6px 8px; padding-left: 20px;">{eq['Name']}</td>
+                            <td style="padding: 6px 8px; text-align: right;">{eq['Balance']:,.2f} Cr</td>
+                        </tr>
+            """
+        html += f"""
+                        <tr style="{border_style}">
+                            <td style="padding: 6px 8px; padding-left: 20px;">Net Profit / (Loss)</td>
+                            <td style="padding: 6px 8px; text-align: right;">{np_:,.2f} Cr</td>
+                        </tr>
+                        <tr style="font-weight: bold; {sub_border}">
+                            <td style="padding: 6px 8px;">Total Equity</td>
+                            <td style="padding: 6px 8px; text-align: right;">{te:,.2f} Cr</td>
+                        </tr>
+                        <tr style="font-weight: bold; {double_border}">
+                            <td style="padding: 6px 8px;">Total Liab. & Equity</td>
+                            <td style="padding: 6px 8px; text-align: right;">{tl + te:,.2f} Cr</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+        """
+        return html
+
+    show_print_link("Balance Sheet", subtitle_lbl, build_bs_table_html(is_printable=True))
 
     c1, c2, c3 = st.columns(3)
     c1.metric("Total Assets",      f"₹{ta:,.2f}")
@@ -456,16 +1353,9 @@ def page_bs():
     else:
         st.warning(f"⚠️ Difference: ₹{abs(ta - tl - te):,.2f}")
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.subheader("Assets")
-        if assets: st.dataframe(pd.DataFrame(assets), use_container_width=True, hide_index=True)
-    with col2:
-        st.subheader("Liabilities")
-        if liabs: st.dataframe(pd.DataFrame(liabs), use_container_width=True, hide_index=True)
-        st.subheader("Equity")
-        if eq_rows: st.dataframe(pd.DataFrame(eq_rows), use_container_width=True, hide_index=True)
-        st.metric("P&L (Net Profit)", f"₹{np_:,.2f}")
+    st.markdown(INLINE_CSS, unsafe_allow_html=True)
+    st.markdown(f'<div class="report-table-wrapper">{build_bs_table_html(is_printable=False)}</div>', unsafe_allow_html=True)
+
 
 # ── Stock ─────────────────────────────────────────────────────────
 def page_stock():
@@ -480,12 +1370,65 @@ def page_stock():
         to_d   = c2.date_input("To", value=date.today(), key="st")
 
     stock = compute_stock(from_d, to_d)
-    if stock:
-        df = pd.DataFrame(stock)
-        st.dataframe(df, use_container_width=True, hide_index=True)
-        st.metric("Total Stock Value", f"₹{df['Value'].sum():,.2f}")
-    else:
+    
+    subtitle_lbl = "All time"
+    if from_d and to_d: subtitle_lbl = f"Period: {from_d} to {to_d}"
+    elif from_d: subtitle_lbl = f"From {from_d} onward"
+    elif to_d: subtitle_lbl = f"Up to {to_d}"
+
+    if not stock:
         st.info("No stock data.")
+        return
+
+    def build_stock_table_html(is_printable=False):
+        border_style = "border-bottom: 1px dashed #ccc;" if is_printable else "border-bottom: 1px dashed #1f2937;"
+        double_border = "border-top: 2px solid #000; border-bottom: 2px double #000;" if is_printable else "border-top: 2px solid #374151; border-bottom: 2px double #374151;"
+        top_border = "border-bottom: 2px solid #000; border-top: 2px solid #000;" if is_printable else "border-bottom: 2px solid #374151;"
+        
+        html = f"""
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="{top_border}">
+                    <th style="padding: 6px 8px; text-align: left;">Item</th>
+                    <th style="padding: 6px 8px; text-align: right;">Opening</th>
+                    <th style="padding: 6px 8px; text-align: right;">In</th>
+                    <th style="padding: 6px 8px; text-align: right;">Out</th>
+                    <th style="padding: 6px 8px; text-align: right;">Closing</th>
+                    <th style="padding: 6px 8px; text-align: right;">Avg Rate</th>
+                    <th style="padding: 6px 8px; text-align: right;">Value</th>
+                </tr>
+            </thead>
+            <tbody>
+        """
+        total_val = 0.0
+        for s in stock:
+            total_val += s['Value']
+            html += f"""
+                <tr style="{border_style}">
+                    <td style="padding: 6px 8px;">{s['Item']} <span style="font-size:11px; opacity:0.75;">({s['Unit']})</span></td>
+                    <td style="padding: 6px 8px; text-align: right;">{s['Opening']:,.2f}</td>
+                    <td style="padding: 6px 8px; text-align: right;">{s['In']:,.2f}</td>
+                    <td style="padding: 6px 8px; text-align: right;">{s['Out']:,.2f}</td>
+                    <td style="padding: 6px 8px; text-align: right;">{s['Closing']:,.2f}</td>
+                    <td style="padding: 6px 8px; text-align: right;">{s['Avg Rate']:,.2f}</td>
+                    <td style="padding: 6px 8px; text-align: right;">{s['Value']:,.2f}</td>
+                </tr>
+            """
+        html += f"""
+                <tr style="font-weight: bold; {double_border}">
+                    <td colspan="6" style="padding: 6px 8px;">Total stock value</td>
+                    <td style="padding: 6px 8px; text-align: right;">{total_val:,.2f}</td>
+                </tr>
+            </tbody>
+        </table>
+        """
+        return html
+
+    show_print_link("Stock Inventory Summary", subtitle_lbl, build_stock_table_html(is_printable=True))
+    
+    st.markdown(INLINE_CSS, unsafe_allow_html=True)
+    st.markdown(f'<div class="report-table-wrapper">{build_stock_table_html(is_printable=False)}</div>', unsafe_allow_html=True)
+
 
 # ── Account Ledger ────────────────────────────────────────────────
 def page_ledger():
@@ -514,7 +1457,7 @@ def page_ledger():
     ob_side = str(acc_row.get("Opening Side", "debit"))
     base    = ob_val if ob_side == natural else -ob_val
 
-    e_df = entries(); v_df = vouchers()
+    e_df = entries(); v_df = vouchers(); sl_all = stock_lines()
     if e_df.empty or v_df.empty:
         st.info("No transactions."); return
 
@@ -528,20 +1471,124 @@ def page_ledger():
     if from_d: ae = ae[ae["Date"] >= str(from_d)]
     if to_d:   ae = ae[ae["Date"] <= str(to_d)]
 
-    st.metric("Opening Balance", f"₹{base:,.2f}")
+    subtitle_lbl = f"Account: {sel} — "
+    if from_d and to_d: subtitle_lbl += f"Period: {from_d} to {to_d}"
+    elif from_d: subtitle_lbl += f"From {from_d} onward"
+    elif to_d: subtitle_lbl += f"Up to {to_d}"
+    else: subtitle_lbl += "All time"
+
     rows, running = [], base
     for _, r in ae.iterrows():
         delta   = (r["Debit"]-r["Credit"]) if is_dr else (r["Credit"]-r["Debit"])
         running += delta
-        rows.append({"Date": r["Date"], "Type": r["Type"], "Reference": r["Reference"],
-                     "Narration": r["Narration"], "Debit": r["Debit"], "Credit": r["Credit"],
-                     "Balance": round(running, 2)})
+        
+        # Pull item movements for this specific voucher
+        vid = r["Voucher ID"]
+        items_lines = []
+        if not sl_all.empty:
+            v_items = sl_all[sl_all["Voucher ID"] == vid]
+            for _, itm in v_items.iterrows():
+                gst = f" + {itm['GST Rate']}%" if float(itm.get("GST Rate", 0) or 0) > 0 else ""
+                rate_str = f" @ ₹{float(itm['Rate']):,.2f}" if float(itm.get("Rate", 0) or 0) > 0 else ""
+                line = f"{itm['Item Name']} — {float(itm['Qty']):,.3f} {itm.get('Unit', '')}{rate_str}{gst}"
+                items_lines.append(line)
+        
+        rows.append({
+            "Date": r["Date"],
+            "Type": r["Type"],
+            "Reference": r["Reference"],
+            "Narration": r["Narration"],
+            "Items": items_lines,
+            "Debit": r["Debit"] if r["Debit"] > 0 else 0,
+            "Credit": r["Credit"] if r["Credit"] > 0 else 0,
+            "Balance": round(running, 2)
+        })
 
-    if rows:
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        st.metric("Closing Balance", f"₹{running:,.2f}")
-    else:
-        st.info("No transactions in the selected period.")
+    def build_ledger_table_html(is_printable=False):
+        border_style = "border-bottom: 1px dashed #ccc;" if is_printable else "border-bottom: 1px dashed #1f2937;"
+        double_border = "border-top: 2px solid #000; border-bottom: 2px double #000;" if is_printable else "border-top: 2px solid #374151; border-bottom: 2px double #374151;"
+        top_border = "border-bottom: 2px solid #000; border-top: 2px solid #000;" if is_printable else "border-bottom: 2px solid #374151;"
+        
+        html = f"""
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="{top_border}">
+                    <th style="padding: 6px 8px; text-align: left;">Date</th>
+                    <th style="padding: 6px 8px; text-align: left;">Type</th>
+                    <th style="padding: 6px 8px; text-align: left;">Narration & Item Details</th>
+                    <th style="padding: 6px 8px; text-align: right;">Debit</th>
+                    <th style="padding: 6px 8px; text-align: right;">Credit</th>
+                    <th style="padding: 6px 8px; text-align: right;">Balance</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr style="{border_style}">
+                    <td></td>
+                    <td></td>
+                    <td style="color: {'#555' if is_printable else '#7a93b0'}; font-style: italic;">Opening Balance</td>
+                    <td></td>
+                    <td></td>
+                    <td style="text-align: right; font-weight: bold;">{abs(base):,.2f} {"Dr" if base >= 0 else "Cr"}</td>
+                </tr>
+        """
+        for r in rows:
+            dr_str = f"{r['Debit']:,.2f}" if r['Debit'] > 0 else ""
+            cr_str = f"{r['Credit']:,.2f}" if r['Credit'] > 0 else ""
+            bal_str = f"{abs(r['Balance']):,.2f} {'Dr' if r['Balance'] >= 0 else 'Cr'}"
+            
+            # Format Narration cell
+            narr_parts = []
+            if r["Reference"]: narr_parts.append(f"<b>Ref: {r['Reference']}</b>")
+            if r["Narration"]: narr_parts.append(r["Narration"])
+            narr_line = " — ".join(narr_parts) if narr_parts else "—"
+            
+            # Add item lines
+            item_lines_html = ""
+            for itm in r["Items"]:
+                if is_printable:
+                    item_lines_html += f'<div style="font-size: 11px; color: #555; padding-left: 15px;">└─ {itm}</div>'
+                else:
+                    item_lines_html += f'<span class="item-line">└─ {itm}</span>'
+            
+            badge_style = "" if is_printable else 'class="badge"'
+            
+            html += f"""
+                <tr style="{border_style}">
+                    <td style="white-space: nowrap;">{r['Date']}</td>
+                    <td><span {badge_style}>{r['Type']}</span></td>
+                    <td style="line-height: 1.4;">
+                        {narr_line}
+                        {item_lines_html}
+                    </td>
+                    <td style="text-align: right;">{dr_str}</td>
+                    <td style="text-align: right;">{cr_str}</td>
+                    <td style="text-align: right;">{bal_str}</td>
+                </tr>
+            """
+            
+        cb_side = "Dr" if running >= 0 else "Cr"
+        html += f"""
+                <tr style="font-weight: bold; {double_border}">
+                    <td></td>
+                    <td></td>
+                    <td>Closing Balance</td>
+                    <td></td>
+                    <td></td>
+                    <td style="text-align: right;">{abs(running):,.2f} {cb_side}</td>
+                </tr>
+            </tbody>
+        </table>
+        """
+        return html
+
+    show_print_link("Account Ledger Statement", subtitle_lbl, build_ledger_table_html(is_printable=True))
+
+    st.metric("Opening Balance", f"₹{base:,.2f}")
+    
+    st.markdown(INLINE_CSS, unsafe_allow_html=True)
+    st.markdown(f'<div class="report-table-wrapper">{build_ledger_table_html(is_printable=False)}</div>', unsafe_allow_html=True)
+    
+    st.metric("Closing Balance", f"₹{running:,.2f}")
 
 # ================================================================
 #  MAIN
