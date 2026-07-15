@@ -1252,7 +1252,8 @@ def page_pl():
               delta=("Profit ✅" if np_ >= 0 else "Loss ❌"), delta_color="normal" if np_ >= 0 else "inverse")
 
     st.markdown(INLINE_CSS, unsafe_allow_html=True)
-    st.markdown(f'<div class="report-table-wrapper">{build_pl_table_html(is_printable=False)}</div>', unsafe_allow_html=True)
+    clean_pl_html = "".join([line.strip() for line in build_pl_table_html(is_printable=False).split("\n")])
+    st.markdown(f'<div class="report-table-wrapper">{clean_pl_html}</div>', unsafe_allow_html=True)
 
 
 # ── Balance Sheet ─────────────────────────────────────────────────
@@ -1354,7 +1355,8 @@ def page_bs():
         st.warning(f"⚠️ Difference: ₹{abs(ta - tl - te):,.2f}")
 
     st.markdown(INLINE_CSS, unsafe_allow_html=True)
-    st.markdown(f'<div class="report-table-wrapper">{build_bs_table_html(is_printable=False)}</div>', unsafe_allow_html=True)
+    clean_bs_html = "".join([line.strip() for line in build_bs_table_html(is_printable=False).split("\n")])
+    st.markdown(f'<div class="report-table-wrapper">{clean_bs_html}</div>', unsafe_allow_html=True)
 
 
 # ── Stock ─────────────────────────────────────────────────────────
@@ -1427,7 +1429,8 @@ def page_stock():
     show_print_link("Stock Inventory Summary", subtitle_lbl, build_stock_table_html(is_printable=True))
     
     st.markdown(INLINE_CSS, unsafe_allow_html=True)
-    st.markdown(f'<div class="report-table-wrapper">{build_stock_table_html(is_printable=False)}</div>', unsafe_allow_html=True)
+    clean_stock_html = "".join([line.strip() for line in build_stock_table_html(is_printable=False).split("\n")])
+    st.markdown(f'<div class="report-table-wrapper">{clean_stock_html}</div>', unsafe_allow_html=True)
 
 
 # ── Account Ledger ────────────────────────────────────────────────
@@ -1586,7 +1589,8 @@ def page_ledger():
     st.metric("Opening Balance", f"₹{base:,.2f}")
     
     st.markdown(INLINE_CSS, unsafe_allow_html=True)
-    st.markdown(f'<div class="report-table-wrapper">{build_ledger_table_html(is_printable=False)}</div>', unsafe_allow_html=True)
+    clean_ledger_html = "".join([line.strip() for line in build_ledger_table_html(is_printable=False).split("\n")])
+    st.markdown(f'<div class="report-table-wrapper">{clean_ledger_html}</div>', unsafe_allow_html=True)
     
     st.metric("Closing Balance", f"₹{running:,.2f}")
 
