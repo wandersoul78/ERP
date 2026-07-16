@@ -1,12 +1,91 @@
-import sqlite3
 import os
-import threading  # Required to run Flask and the window UI concurrently
 import sys
+import threading
 from datetime import date
 from flask import Flask, g, jsonify, request, send_from_directory
-import webview  # The desktop window framework
+import webview
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from dotenv import load_dotenv
 
-DB_PATH    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ledger.db")
+load_dotenv()
+DATABASE_URL = os.getenv("SUPABASE_DB_URL")
+
+class FakeSqlite3:
+    IntegrityError = psycopg2.IntegrityError
+    Error = psycopg2.Error
+sqlite3 = FakeSqlite3()
+
+class CursorWrapper:
+    def __init__(self, cur):
+        self.cur = cur
+        self._lastrowid = None
+
+    def execute(self, sql, params=None):
+        sql = sql.replace('?', '%s')
+        is_insert = sql.strip().upper().startswith("INSERT")
+        if is_insert and "RETURNING" not in sql.upper():
+            sql = sql.rstrip('; ') + " RETURNING id"
+            self.cur.execute(sql, params)
+            try:
+                row = self.cur.fetchone()
+                if row:
+                    if isinstance(row, dict):
+                        self._lastrowid = list(row.values())[0]
+                    else:
+                        self._lastrowid = row[0]
+            except Exception:
+                pass
+        else:
+            self.cur.execute(sql, params)
+        return self
+
+    def fetchone(self):
+        return self.cur.fetchone()
+
+    def fetchall(self):
+        return self.cur.fetchall()
+
+    @property
+    def lastrowid(self):
+        return self._lastrowid
+
+    def __iter__(self):
+        return iter(self.cur)
+
+class DbWrapper:
+    def __init__(self, conn):
+        self.conn = conn
+
+    def __enter__(self):
+        self.conn.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        return self.conn.__exit__(exc_type, exc_val, exc_tb)
+
+    def execute(self, sql, params=None):
+        sql = sql.replace('?', '%s')
+        cur = self.conn.cursor()
+        wrapped = CursorWrapper(cur)
+        wrapped.execute(sql, params)
+        return wrapped
+
+    def executemany(self, sql, seq_of_params):
+        sql = sql.replace('?', '%s')
+        cur = self.conn.cursor()
+        cur.executemany(sql, seq_of_params)
+        return CursorWrapper(cur)
+
+    def commit(self):
+        self.conn.commit()
+
+    def rollback(self):
+        self.conn.rollback()
+
+    def close(self):
+        self.conn.close()
+
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 CREDS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "service_account.json")
 
@@ -30,14 +109,12 @@ def _after_write(response):
         _trigger_sync()
     return response
 
-
 def get_db():
     if "db" not in g:
-        g.db = sqlite3.connect(DB_PATH)
-        g.db.row_factory = sqlite3.Row
-        g.db.execute("PRAGMA foreign_keys = ON")
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.cursor_factory = RealDictCursor
+        g.db = DbWrapper(conn)
     return g.db
-
 
 @app.teardown_appcontext
 def close_db(exception=None):
@@ -93,36 +170,7 @@ CREATE TABLE IF NOT EXISTS voucher_items (
 
 
 def init_db():
-    first_time = not os.path.exists(DB_PATH)
-    db = sqlite3.connect(DB_PATH)
-    db.executescript(SCHEMA)
-
-    # migration: add 'reference' column if the db predates it
-    cols = [r[1] for r in db.execute("PRAGMA table_info(vouchers)").fetchall()]
-    if "reference" not in cols:
-        db.execute("ALTER TABLE vouchers ADD COLUMN reference TEXT DEFAULT ''")
-        db.commit()
-
-    # migration: add 'gst_rate' column to voucher_items if the db predates it
-    vi_cols = [r[1] for r in db.execute("PRAGMA table_info(voucher_items)").fetchall()]
-    if "gst_rate" not in vi_cols:
-        db.execute("ALTER TABLE voucher_items ADD COLUMN gst_rate REAL NOT NULL DEFAULT 0")
-        db.commit()
-
-    if first_time:
-        defaults = [
-            ("Cash", "asset", 0, "debit"),
-            ("Bank", "asset", 0, "debit"),
-            ("Sales", "income", 0, "credit"),
-            ("Purchases", "expense", 0, "debit"),
-            ("Capital", "equity", 0, "credit"),
-        ]
-        db.executemany(
-            "INSERT INTO accounts (name, type, opening_balance, opening_side) VALUES (?,?,?,?)",
-            defaults,
-        )
-        db.commit()
-    db.close()
+    pass
 
 
 # ---------- static ----------
@@ -130,6 +178,26 @@ def init_db():
 @app.route("/")
 def index():
     return send_from_directory(STATIC_DIR, "index.html")
+
+
+@app.route("/api/config", methods=["GET"])
+def get_config():
+    return jsonify({
+        "company_name": os.getenv("COMPANY_NAME") or "Ledger",
+        "password_protected": bool(os.getenv("APP_PASSWORD"))
+    })
+
+
+@app.route("/api/login", methods=["POST"])
+def login():
+    data = request.get_json(force=True)
+    pwd = data.get("password")
+    expected = os.getenv("APP_PASSWORD")
+    if not expected:
+        return jsonify({"ok": True})
+    if pwd == expected:
+        return jsonify({"ok": True})
+    return jsonify({"error": "Incorrect password"}), 401
 
 
 # ---------- accounts ----------
@@ -726,7 +794,6 @@ if __name__ == "__main__":
     init_db()
 
     # ── Google Sheets sync (optional) ──────────────────────────────
-    global _sheets
     if os.path.exists(CREDS_PATH):
         try:
             from sheets_sync import SheetsSync

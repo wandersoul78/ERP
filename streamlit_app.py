@@ -1592,12 +1592,36 @@ def page_ledger():
 #  MAIN
 # ================================================================
 def main():
+    # Load settings
+    company_name = os.getenv("COMPANY_NAME") or st.secrets.get("company_name") or "ERP Ledger"
+    app_password = os.getenv("APP_PASSWORD") or st.secrets.get("app_password")
+
     st.set_page_config(
-        page_title="ERP Ledger",
+        page_title=company_name,
         page_icon="📒",
         layout="wide",
         initial_sidebar_state="expanded",
     )
+
+    # Password lock
+    if app_password:
+        if "authenticated" not in st.session_state:
+            st.session_state["authenticated"] = False
+            
+        if not st.session_state["authenticated"]:
+            st.markdown("<br><br>", unsafe_allow_html=True)
+            c1, c2, c3 = st.columns([1, 2, 1])
+            with c2:
+                st.markdown(f"<h2 style='text-align: center;'>🔒 {company_name}</h2>", unsafe_allow_html=True)
+                st.write("Please enter the login password to access this system.")
+                typed = st.text_input("Password", type="password", key="app_pwd_input")
+                if st.button("Unlock System", use_container_width=True, type="primary"):
+                    if typed == app_password:
+                        st.session_state["authenticated"] = True
+                        st.rerun()
+                    else:
+                        st.error("Incorrect password. Please try again.")
+            return
 
     st.markdown("""
     <style>
@@ -1607,8 +1631,8 @@ def main():
     </style>""", unsafe_allow_html=True)
 
     with st.sidebar:
-        st.markdown("## 📒 ERP Ledger")
-        st.caption(f"Sheet: {SHEET_NAME}")
+        st.markdown(f"## 📒 {company_name}")
+        st.caption(f"Database: Supabase Cloud")
         st.divider()
         page = st.radio("", [
             "📊 Dashboard",
