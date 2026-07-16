@@ -96,18 +96,23 @@ def _append(tab: str, row: list):
     cur = conn.cursor()
     if tab == "Accounts":
         cur.execute("INSERT INTO accounts (id, name, type, opening_balance, opening_side) VALUES (%s, %s, %s, %s, %s)", row)
+        cur.execute("SELECT setval('accounts_id_seq', COALESCE((SELECT MAX(id) FROM accounts), 1))")
     elif tab == "Items":
         cur.execute("INSERT INTO items (id, name, unit, opening_qty, opening_rate) VALUES (%s, %s, %s, %s, %s)", row)
+        cur.execute("SELECT setval('items_id_seq', COALESCE((SELECT MAX(id) FROM items), 1))")
     elif tab == "Vouchers":
         cur.execute("INSERT INTO vouchers (id, date, type, reference, narration, created_at) VALUES (%s, %s, %s, %s, %s, %s)", row)
+        cur.execute("SELECT setval('vouchers_id_seq', COALESCE((SELECT MAX(id) FROM vouchers), 1))")
     elif tab == "Entries":
         # skip Account Name (row[3])
         val = [row[0], row[1], row[2], row[4], row[5]]
         cur.execute("INSERT INTO voucher_entries (id, voucher_id, account_id, debit, credit) VALUES (%s, %s, %s, %s, %s)", val)
+        cur.execute("SELECT setval('voucher_entries_id_seq', COALESCE((SELECT MAX(id) FROM voucher_entries), 1))")
     elif tab == "Stock Lines":
         # skip Item Name (row[3])
         val = [row[0], row[1], row[2], row[4], row[5], row[6], row[7]]
         cur.execute("INSERT INTO voucher_items (id, voucher_id, item_id, direction, qty, rate, gst_rate) VALUES (%s, %s, %s, %s, %s, %s, %s)", val)
+        cur.execute("SELECT setval('voucher_items_id_seq', COALESCE((SELECT MAX(id) FROM voucher_items), 1))")
     conn.commit()
     conn.close()
 
