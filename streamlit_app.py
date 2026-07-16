@@ -7,94 +7,62 @@ Deploy to Streamlit Cloud. Add credentials in st.secrets.
 """
 
 import streamlit as st
-import gspread
 import pandas as pd
-import json
 from datetime import date, datetime
-from google.oauth2.service_account import Credentials
+import psycopg2
+import os
+from dotenv import load_dotenv
 
-SHEET_NAME  = st.secrets.get("sheet_name", "ERP Ledger") if hasattr(st, "secrets") else "ERP Ledger"
+load_dotenv()
+DATABASE_URL = os.getenv("SUPABASE_DB_URL") or st.secrets.get("supabase_db_url")
+
+SHEET_NAME  = "Supabase Cloud"
 ACCOUNT_TYPES = ["asset", "liability", "income", "expense", "equity"]
 VOUCHER_TYPES = ["sales", "purchase", "payment", "receipt", "journal", "production"]
-SCOPES = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive",
-]
-
-# Tab headers (must match sheets_sync.py)
-TABS = {
-    "Accounts":    ["ID", "Name", "Type", "Opening Balance", "Opening Side"],
-    "Items":       ["ID", "Name", "Unit", "Opening Qty", "Opening Rate"],
-    "Vouchers":    ["ID", "Date", "Type", "Reference", "Narration", "Created At"],
-    "Entries":     ["ID", "Voucher ID", "Account ID", "Account Name", "Debit", "Credit"],
-    "Stock Lines": ["ID", "Voucher ID", "Item ID", "Item Name", "Direction", "Qty", "Rate", "GST Rate"],
-}
 
 # ================================================================
-#  CONNECTION
+#  CONNECTION & DATA LOADING
 # ================================================================
-@st.cache_resource(show_spinner="Connecting to Google Sheets…")
-def get_spreadsheet():
-    """
-    Supports two secrets formats (try format 1 first — it is 100% reliable):
-
-    Format 1 — Recommended: paste the ENTIRE service_account.json as a string
-        service_account_json = '{"type":"service_account","project_id":"..."}'
-
-    Format 2 — Individual TOML fields under [gcp_service_account]
-        [gcp_service_account]
-        type = "service_account"  ...etc
-
-    The spreadsheet is auto-created if it doesn't exist yet.
-    No need to create a sheet manually or provide a Sheet ID.
-    """
-    if "service_account_json" in st.secrets:
-        creds_info = json.loads(st.secrets["service_account_json"])
-    else:
-        creds_info = dict(st.secrets["gcp_service_account"])
-        key = creds_info.get("private_key", "")
-        key = key.replace("\\n", "\n")
-        key = key.replace("\r\n", "\n").replace("\r", "\n")
-        if not key.endswith("\n"):
-            key += "\n"
-        creds_info["private_key"] = key
-
-    creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
-    gc    = gspread.authorize(creds)
-
-    # ── Open existing sheet or create a new one ───────────────────
-    try:
-        ss = gc.open(SHEET_NAME)
-    except gspread.SpreadsheetNotFound:
-        ss = gc.create(SHEET_NAME)
-        # Share as viewer with anyone who has the link
-        ss.share(None, perm_type="anyone", role="reader")
-
-    # ── Ensure all required tabs exist ────────────────────────────
-    existing = {ws.title for ws in ss.worksheets()}
-    for tab, headers in TABS.items():
-        if tab not in existing:
-            ws = ss.add_worksheet(title=tab, rows=5000, cols=len(headers) + 2)
-            ws.update([headers])
-
-    # Remove default "Sheet1" if present
-    if "Sheet1" in existing:
-        try:
-            ss.del_worksheet(ss.worksheet("Sheet1"))
-        except Exception:
-            pass
-
-    return ss
-
-# ================================================================
-#  DATA LOADING  (session-state cache, refresh on demand)
-# ================================================================
-def _ws(name: str):
-    return get_spreadsheet().worksheet(name)
-
 def _df(name: str) -> pd.DataFrame:
-    records = _ws(name).get_all_records()
-    return pd.DataFrame(records) if records else pd.DataFrame()
+    if not DATABASE_URL:
+        st.error("Database connection URL not set. Please set SUPABASE_DB_URL in .env or st.secrets.")
+        return pd.DataFrame()
+
+    conn = psycopg2.connect(DATABASE_URL)
+    
+    if name == "Accounts":
+        query = "SELECT * FROM accounts"
+        col_map = {"id": "ID", "name": "Name", "type": "Type", "opening_balance": "Opening Balance", "opening_side": "Opening Side"}
+    elif name == "Items":
+        query = "SELECT * FROM items"
+        col_map = {"id": "ID", "name": "Name", "unit": "Unit", "opening_qty": "Opening Qty", "opening_rate": "Opening Rate"}
+    elif name == "Vouchers":
+        query = "SELECT * FROM vouchers"
+        col_map = {"id": "ID", "date": "Date", "type": "Type", "reference": "Reference", "narration": "Narration", "created_at": "Created At"}
+    elif name == "Entries":
+        query = """
+            SELECT ve.id, ve.voucher_id, ve.account_id, a.name AS account_name, ve.debit, ve.credit
+            FROM voucher_entries ve
+            JOIN accounts a ON a.id = ve.account_id
+        """
+        col_map = {"id": "ID", "voucher_id": "Voucher ID", "account_id": "Account ID", "account_name": "Account Name", "debit": "Debit", "credit": "Credit"}
+    elif name == "Stock Lines":
+        query = """
+            SELECT vi.id, vi.voucher_id, vi.item_id, i.name AS item_name, vi.direction, vi.qty, vi.rate, vi.gst_rate
+            FROM voucher_items vi
+            JOIN items i ON i.id = vi.item_id
+        """
+        col_map = {"id": "ID", "voucher_id": "Voucher ID", "item_id": "Item ID", "item_name": "Item Name", "direction": "Direction", "qty": "Qty", "rate": "Rate", "gst_rate": "GST Rate"}
+    else:
+        conn.close()
+        return pd.DataFrame()
+
+    df = pd.read_sql_query(query, conn)
+    conn.close()
+    
+    # Rename columns to match the old format
+    df.rename(columns=col_map, inplace=True)
+    return df
 
 def load_data():
     st.session_state["accounts"]    = _df("Accounts")
@@ -124,24 +92,58 @@ def _next_id(df: pd.DataFrame, col: str = "ID") -> int:
     return int(vals.max()) + 1 if len(vals) > 0 else 1
 
 def _append(tab: str, row: list):
-    _ws(tab).append_row(row, value_input_option="USER_ENTERED")
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    if tab == "Accounts":
+        cur.execute("INSERT INTO accounts (id, name, type, opening_balance, opening_side) VALUES (%s, %s, %s, %s, %s)", row)
+    elif tab == "Items":
+        cur.execute("INSERT INTO items (id, name, unit, opening_qty, opening_rate) VALUES (%s, %s, %s, %s, %s)", row)
+    elif tab == "Vouchers":
+        cur.execute("INSERT INTO vouchers (id, date, type, reference, narration, created_at) VALUES (%s, %s, %s, %s, %s, %s)", row)
+    elif tab == "Entries":
+        # skip Account Name (row[3])
+        val = [row[0], row[1], row[2], row[4], row[5]]
+        cur.execute("INSERT INTO voucher_entries (id, voucher_id, account_id, debit, credit) VALUES (%s, %s, %s, %s, %s)", val)
+    elif tab == "Stock Lines":
+        # skip Item Name (row[3])
+        val = [row[0], row[1], row[2], row[4], row[5], row[6], row[7]]
+        cur.execute("INSERT INTO voucher_items (id, voucher_id, item_id, direction, qty, rate, gst_rate) VALUES (%s, %s, %s, %s, %s, %s, %s)", val)
+    conn.commit()
+    conn.close()
 
 def _delete_rows_where(tab: str, col: str, value):
-    ws = _ws(tab)
-    records = ws.get_all_records()
-    idxs = [i + 2 for i, r in enumerate(records) if str(r.get(col, "")) == str(value)]
-    for idx in reversed(idxs):
-        ws.delete_rows(idx)
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    col_map = {"ID": "id", "Voucher ID": "voucher_id"}
+    db_col = col_map.get(col, col.lower())
+    
+    if tab == "Accounts":
+        cur.execute(f"DELETE FROM accounts WHERE {db_col} = %s", (value,))
+    elif tab == "Items":
+        cur.execute(f"DELETE FROM items WHERE {db_col} = %s", (value,))
+    elif tab == "Vouchers":
+        cur.execute(f"DELETE FROM vouchers WHERE {db_col} = %s", (value,))
+    elif tab == "Entries":
+        cur.execute(f"DELETE FROM voucher_entries WHERE {db_col} = %s", (value,))
+    elif tab == "Stock Lines":
+        cur.execute(f"DELETE FROM voucher_items WHERE {db_col} = %s", (value,))
+    conn.commit()
+    conn.close()
 
 def _update_row_where(tab: str, col_id: str, id_val, new_values: list):
-    ws = _ws(tab)
-    records = ws.get_all_records()
-    for i, r in enumerate(records):
-        if str(r.get(col_id, "")) == str(id_val):
-            row_idx = i + 2
-            col_letter = chr(ord('A') + len(new_values) - 1)
-            ws.update(range_name=f"A{row_idx}:{col_letter}{row_idx}", values=[new_values], value_input_option="USER_ENTERED")
-            break
+    conn = psycopg2.connect(DATABASE_URL)
+    cur = conn.cursor()
+    if tab == "Accounts":
+        cur.execute("UPDATE accounts SET name = %s, type = %s, opening_balance = %s, opening_side = %s WHERE id = %s",
+                    (new_values[1], new_values[2], new_values[3], new_values[4], id_val))
+    elif tab == "Items":
+        cur.execute("UPDATE items SET name = %s, unit = %s, opening_qty = %s, opening_rate = %s WHERE id = %s",
+                    (new_values[1], new_values[2], new_values[3], new_values[4], id_val))
+    elif tab == "Vouchers":
+        cur.execute("UPDATE vouchers SET date = %s, type = %s, reference = %s, narration = %s WHERE id = %s",
+                    (new_values[1], new_values[2], new_values[3], new_values[4], id_val))
+    conn.commit()
+    conn.close()
 
 # ================================================================
 #  REPORT COMPUTATIONS
