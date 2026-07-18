@@ -85,36 +85,91 @@ def stock_lines() -> pd.DataFrame: return st.session_state.get("stock_lines", pd
 # ================================================================
 #  WRITE HELPERS
 # ================================================================
-def _next_id(df: pd.DataFrame, col: str = "ID") -> int:
-    if df.empty or col not in df.columns or len(df) == 0:
-        return 1
-    vals = pd.to_numeric(df[col], errors="coerce").dropna()
-    return int(vals.max()) + 1 if len(vals) > 0 else 1
+def _next_id(tab_or_df, col: str = "ID") -> int:
+    tab_map = {
+        "Accounts": "accounts",
+        "Items": "items",
+        "Vouchers": "vouchers",
+        "Entries": "voucher_entries",
+        "Stock Lines": "voucher_items"
+    }
+    table_name = None
+    if isinstance(tab_or_df, str):
+        table_name = tab_map.get(tab_or_df, tab_or_df.lower())
+    elif isinstance(tab_or_df, pd.DataFrame):
+        df = tab_or_df
+        if df.empty or col not in df.columns or len(df) == 0:
+            return 1
+        vals = pd.to_numeric(df[col], errors="coerce").dropna()
+        return int(vals.max()) + 1 if len(vals) > 0 else 1
+
+    if table_name and DATABASE_URL:
+        try:
+            conn = psycopg2.connect(DATABASE_URL)
+            cur = conn.cursor()
+            cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table_name}")
+            row = cur.fetchone()
+            conn.close()
+            return int(row[0] or 0) + 1
+        except Exception:
+            pass
+            
+    return 1
 
 def _append(tab: str, row: list):
+    if not DATABASE_URL:
+        return
     conn = psycopg2.connect(DATABASE_URL)
     cur = conn.cursor()
-    if tab == "Accounts":
-        cur.execute("INSERT INTO accounts (id, name, type, opening_balance, opening_side) VALUES (%s, %s, %s, %s, %s)", row)
-        cur.execute("SELECT setval('accounts_id_seq', COALESCE((SELECT MAX(id) FROM accounts), 1))")
-    elif tab == "Items":
-        cur.execute("INSERT INTO items (id, name, unit, opening_qty, opening_rate) VALUES (%s, %s, %s, %s, %s)", row)
-        cur.execute("SELECT setval('items_id_seq', COALESCE((SELECT MAX(id) FROM items), 1))")
-    elif tab == "Vouchers":
-        cur.execute("INSERT INTO vouchers (id, date, type, reference, narration, created_at) VALUES (%s, %s, %s, %s, %s, %s)", row)
-        cur.execute("SELECT setval('vouchers_id_seq', COALESCE((SELECT MAX(id) FROM vouchers), 1))")
-    elif tab == "Entries":
-        # skip Account Name (row[3])
-        val = [row[0], row[1], row[2], row[4], row[5]]
-        cur.execute("INSERT INTO voucher_entries (id, voucher_id, account_id, debit, credit) VALUES (%s, %s, %s, %s, %s)", val)
-        cur.execute("SELECT setval('voucher_entries_id_seq', COALESCE((SELECT MAX(id) FROM voucher_entries), 1))")
-    elif tab == "Stock Lines":
-        # skip Item Name (row[3])
-        val = [row[0], row[1], row[2], row[4], row[5], row[6], row[7]]
-        cur.execute("INSERT INTO voucher_items (id, voucher_id, item_id, direction, qty, rate, gst_rate) VALUES (%s, %s, %s, %s, %s, %s, %s)", val)
-        cur.execute("SELECT setval('voucher_items_id_seq', COALESCE((SELECT MAX(id) FROM voucher_items), 1))")
-    conn.commit()
-    conn.close()
+    try:
+        if tab == "Accounts":
+            cur.execute("SELECT setval('accounts_id_seq', COALESCE((SELECT MAX(id) FROM accounts), 0))")
+            cur.execute(
+                "INSERT INTO accounts (id, name, type, opening_balance, opening_side) VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, type=EXCLUDED.type, opening_balance=EXCLUDED.opening_balance, opening_side=EXCLUDED.opening_side",
+                row
+            )
+            cur.execute("SELECT setval('accounts_id_seq', COALESCE((SELECT MAX(id) FROM accounts), 0))")
+        elif tab == "Items":
+            cur.execute("SELECT setval('items_id_seq', COALESCE((SELECT MAX(id) FROM items), 0))")
+            cur.execute(
+                "INSERT INTO items (id, name, unit, opening_qty, opening_rate) VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET name=EXCLUDED.name, unit=EXCLUDED.unit, opening_qty=EXCLUDED.opening_qty, opening_rate=EXCLUDED.opening_rate",
+                row
+            )
+            cur.execute("SELECT setval('items_id_seq', COALESCE((SELECT MAX(id) FROM items), 0))")
+        elif tab == "Vouchers":
+            cur.execute("SELECT setval('vouchers_id_seq', COALESCE((SELECT MAX(id) FROM vouchers), 0))")
+            cur.execute(
+                "INSERT INTO vouchers (id, date, type, reference, narration, created_at) VALUES (%s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET date=EXCLUDED.date, type=EXCLUDED.type, reference=EXCLUDED.reference, narration=EXCLUDED.narration",
+                row
+            )
+            cur.execute("SELECT setval('vouchers_id_seq', COALESCE((SELECT MAX(id) FROM vouchers), 0))")
+        elif tab == "Entries":
+            val = [row[0], row[1], row[2], row[4], row[5]] if len(row) == 6 else row
+            cur.execute("SELECT setval('voucher_entries_id_seq', COALESCE((SELECT MAX(id) FROM voucher_entries), 0))")
+            cur.execute(
+                "INSERT INTO voucher_entries (id, voucher_id, account_id, debit, credit) VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET debit=EXCLUDED.debit, credit=EXCLUDED.credit",
+                val
+            )
+            cur.execute("SELECT setval('voucher_entries_id_seq', COALESCE((SELECT MAX(id) FROM voucher_entries), 0))")
+        elif tab == "Stock Lines":
+            val = [row[0], row[1], row[2], row[4], row[5], row[6], row[7]] if len(row) == 8 else row
+            cur.execute("SELECT setval('voucher_items_id_seq', COALESCE((SELECT MAX(id) FROM voucher_items), 0))")
+            cur.execute(
+                "INSERT INTO voucher_items (id, voucher_id, item_id, direction, qty, rate, gst_rate) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET qty=EXCLUDED.qty, rate=EXCLUDED.rate, gst_rate=EXCLUDED.gst_rate",
+                val
+            )
+            cur.execute("SELECT setval('voucher_items_id_seq', COALESCE((SELECT MAX(id) FROM voucher_items), 0))")
+        conn.commit()
+    except Exception as err:
+        conn.rollback()
+        raise err
+    finally:
+        conn.close()
 
 def _delete_rows_where(tab: str, col: str, value):
     conn = psycopg2.connect(DATABASE_URL)
@@ -334,7 +389,7 @@ def page_accounts():
                 elif not accs.empty and name.strip() in accs["Name"].values:
                     st.error("Account already exists.")
                 else:
-                    nid = _next_id(accs)
+                    nid = _next_id("Accounts")
                     _append("Accounts", [nid, name.strip(), typ, ob, ob_side])
                     st.success(f"Account '{name}' created (ID {nid}).")
                     load_data(); st.rerun()
@@ -398,7 +453,7 @@ def page_items():
                 if not name.strip():
                     st.error("Name required.")
                 else:
-                    nid = _next_id(it_df)
+                    nid = _next_id("Items")
                     _append("Items", [nid, name.strip(), unit.strip() or "pcs", oq, or_])
                     st.success(f"Item '{name}' created.")
                     load_data(); st.rerun()
@@ -745,9 +800,9 @@ def page_vouchers():
 
         st.markdown("---")
         if st.button("✅ Save Voucher", type="primary", disabled=not bal_ok):
-            v_id  = _next_id(v_df)
-            e_id  = _next_id(e_df)
-            sl_id = _next_id(stock_lines())
+            v_id  = _next_id("Vouchers")
+            e_id  = _next_id("Entries")
+            sl_id = _next_id("Stock Lines")
             _append("Vouchers", [v_id, str(v_date), v_type, reference, narration, datetime.now().isoformat()])
             ei = 0
             for e in entry_data:
@@ -941,22 +996,16 @@ def page_vouchers():
                 
                 # 2. Update Entries
                 _delete_rows_where("Entries", "Voucher ID", sel_v_id)
-                new_entries = []
-                next_e_id = _next_id(e_df)
+                next_e_id = _next_id("Entries")
                 for idx, e in enumerate(ev_entries_data):
                     if e["debit"] > 0 or e["credit"] > 0:
-                        new_entries.append([next_e_id + idx, sel_v_id, e["account_id"], e["account_name"], e["debit"], e["credit"]])
-                if new_entries:
-                    _ws("Entries").append_rows(new_entries, value_input_option="USER_ENTERED")
+                        _append("Entries", [next_e_id + idx, sel_v_id, e["account_id"], e["account_name"], e["debit"], e["credit"]])
                     
                 # 3. Update Stock Lines
                 _delete_rows_where("Stock Lines", "Voucher ID", sel_v_id)
-                new_stock = []
-                next_sl_id = _next_id(stock_lines())
+                next_sl_id = _next_id("Stock Lines")
                 for idx, s in enumerate(ev_stock_entries):
-                    new_stock.append([next_sl_id + idx, sel_v_id, s["item_id"], s["item_name"], s["direction"], s["qty"], s["rate"], s["gst_rate"]])
-                if new_stock:
-                    _ws("Stock Lines").append_rows(new_stock, value_input_option="USER_ENTERED")
+                    _append("Stock Lines", [next_sl_id + idx, sel_v_id, s["item_id"], s["item_name"], s["direction"], s["qty"], s["rate"], s["gst_rate"]])
                     
                 st.success(f"Voucher #{sel_v_id} updated successfully!")
                 
