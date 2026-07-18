@@ -784,7 +784,7 @@ def page_vouchers():
             c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
             itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"v_item_{j}")
             dire = c2.selectbox("Direction", ["in", "out"],        key=f"v_dir_{j}")
-            qty  = c3.number_input("Qty",  min_value=0.001, step=0.001, key=f"v_qty_{j}", format="%.3f")
+            qty  = c3.number_input("Qty",  min_value=0.01, step=0.01, key=f"v_qty_{j}", format="%.2f")
             rate = c4.number_input("Rate", min_value=0.0,   step=0.01,  key=f"v_rate_{j}", format="%.2f")
             stock_entries.append({"item_id": it_map[itm], "item_name": itm,
                                    "direction": dire, "qty": qty, "rate": rate, "gst_rate": 0})
@@ -889,7 +889,7 @@ def page_vouchers():
                     c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
                     itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"v_item_{j}")
                     dire = c2.selectbox("Direction", ["in", "out"],        key=f"v_dir_{j}")
-                    qty  = c3.number_input("Qty",      min_value=0.001, step=0.001, key=f"v_qty_{j}", format="%.3f")
+                    qty  = c3.number_input("Qty",      min_value=0.01, step=0.01, key=f"v_qty_{j}", format="%.2f")
                     rate = c4.number_input("Rate",     min_value=0.0,   step=0.01,  key=f"v_rate_{j}", format="%.2f")
                     gst  = c5.number_input("GST %",   min_value=0.0,   step=0.5,   key=f"v_gst_{j}", format="%.1f")
                     stock_entries.append({"item_id": it_map[itm], "item_name": itm,
@@ -1064,7 +1064,7 @@ def page_vouchers():
                     c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
                     itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"ev_item_{sel_v_id}_{j}")
                     dire = c2.selectbox("Direction", ["in", "out"],        key=f"ev_dir_{sel_v_id}_{j}")
-                    qty  = c3.number_input("Qty",      min_value=0.001, step=0.001, key=f"ev_qty_{sel_v_id}_{j}", format="%.3f")
+                    qty  = c3.number_input("Qty",      min_value=0.01, step=0.01, key=f"ev_qty_{sel_v_id}_{j}", format="%.2f")
                     rate = c4.number_input("Rate",     min_value=0.0,   step=0.01,  key=f"ev_rate_{sel_v_id}_{j}", format="%.2f")
                     gst  = c5.number_input("GST %",   min_value=0.0,   step=0.5,   key=f"ev_gst_{sel_v_id}_{j}", format="%.1f")
                     ev_stock_entries.append({"item_id": it_map[itm], "item_name": itm,
@@ -1629,7 +1629,7 @@ def page_ledger():
             for _, itm in v_items.iterrows():
                 gst = f" + {itm['GST Rate']}%" if float(itm.get("GST Rate", 0) or 0) > 0 else ""
                 rate_str = f" @ ₹{float(itm['Rate']):,.2f}" if float(itm.get("Rate", 0) or 0) > 0 else ""
-                line = f"{itm['Item Name']} — {float(itm['Qty']):,.3f} {itm.get('Unit', '')}{rate_str}{gst}"
+                line = f"{itm['Item Name']} — {float(itm['Qty']):,.2f} {itm.get('Unit', '')}{rate_str}{gst}"
                 items_lines.append(line)
         
         rows.append({
