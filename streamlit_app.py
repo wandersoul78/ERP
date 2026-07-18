@@ -574,7 +574,7 @@ def page_items():
         with st.form("f_item"):
             name = st.text_input("Name")
             unit = st.text_input("Unit", value="pcs")
-            oq   = st.number_input("Opening Qty",  min_value=0.0, step=0.001, format="%.3f")
+            oq   = st.number_input("Opening Qty",  min_value=0.0, step=0.01, format="%.2f")
             if st.form_submit_button("Create"):
                 if not name.strip():
                     st.error("Name required.")
@@ -595,7 +595,7 @@ def page_items():
             with st.form("f_edit_item"):
                 new_name = st.text_input("Name", value=it_row["Name"])
                 new_unit = st.text_input("Unit", value=it_row["Unit"])
-                new_oq   = st.number_input("Opening Qty", min_value=0.0, step=0.001, value=float(it_row["Opening Qty"]), format="%.3f")
+                new_oq   = st.number_input("Opening Qty", min_value=0.0, step=0.01, value=float(it_row["Opening Qty"]), format="%.2f")
                 new_or   = st.number_input("Opening Rate", min_value=0.0, step=0.01, value=float(it_row["Opening Rate"]), format="%.2f")
                 
                 c1, c2 = st.columns(2)
@@ -1862,13 +1862,13 @@ def page_item_ledger():
                     <td style="color: {'#555' if is_printable else '#7a93b0'}; font-style: italic;">Opening Balance</td>
                     <td></td>
                     <td></td>
-                    <td style="text-align: right; font-weight: bold;">{base_qty:,.3f} {unit_str}</td>
+                    <td style="text-align: right; font-weight: bold;">{base_qty:,.2f} {unit_str}</td>
                 </tr>
         """
         for r in rows:
-            in_str   = f"{r['QtyIn']:,.3f}" if r['QtyIn'] > 0 else ""
-            out_str  = f"{r['QtyOut']:,.3f}" if r['QtyOut'] > 0 else ""
-            bal_str  = f"{r['BalanceQty']:,.3f} {unit_str}"
+            in_str   = f"{r['QtyIn']:,.2f}" if r['QtyIn'] > 0 else ""
+            out_str  = f"{r['QtyOut']:,.2f}" if r['QtyOut'] > 0 else ""
+            bal_str  = f"{r['BalanceQty']:,.2f} {unit_str}"
 
             narr_parts = []
             if r["Reference"]: narr_parts.append(f"<b>Ref: {r['Reference']}</b>")
@@ -1894,9 +1894,9 @@ def page_item_ledger():
                     <td></td>
                     <td></td>
                     <td>Closing Stock Balance</td>
-                    <td style="text-align: right; color: {'#008000' if is_printable else '#4ade80'};">{tot_in_period:,.3f}</td>
-                    <td style="text-align: right; color: {'#cc0000' if is_printable else '#f87171'};">{tot_out_period:,.3f}</td>
-                    <td style="text-align: right;">{running_qty:,.3f} {unit_str}</td>
+                    <td style="text-align: right; color: {'#008000' if is_printable else '#4ade80'};">{tot_in_period:,.2f}</td>
+                    <td style="text-align: right; color: {'#cc0000' if is_printable else '#f87171'};">{tot_out_period:,.2f}</td>
+                    <td style="text-align: right;">{running_qty:,.2f} {unit_str}</td>
                 </tr>
             </tbody>
         </table>
@@ -1906,10 +1906,10 @@ def page_item_ledger():
     show_print_link("Item Ledger Statement", subtitle_lbl, build_item_ledger_table_html(is_printable=True))
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Opening Stock", f"{base_qty:,.3f} {unit_str}")
-    c2.metric("Total Inward", f"{tot_in_period:,.3f} {unit_str}")
-    c3.metric("Total Outward", f"{tot_out_period:,.3f} {unit_str}")
-    c4.metric("Closing Stock", f"{running_qty:,.3f} {unit_str}")
+    c1.metric("Opening Stock", f"{base_qty:,.2f} {unit_str}")
+    c2.metric("Total Inward", f"{tot_in_period:,.2f} {unit_str}")
+    c3.metric("Total Outward", f"{tot_out_period:,.2f} {unit_str}")
+    c4.metric("Closing Stock", f"{running_qty:,.2f} {unit_str}")
 
     st.markdown(INLINE_CSS, unsafe_allow_html=True)
     clean_item_led_html = "".join([line.strip() for line in build_item_ledger_table_html(is_printable=False).split("\n")])
