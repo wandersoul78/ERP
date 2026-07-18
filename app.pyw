@@ -16,6 +16,15 @@ class FakeSqlite3:
     Error = psycopg2.Error
 sqlite3 = FakeSqlite3()
 
+def parse_float(val, default=0.0):
+    if val is None:
+        return default
+    s = str(val).replace(",", "").strip()
+    if not s:
+        return default
+    return float(s)
+
+
 class CursorWrapper:
     def __init__(self, cur):
         self.cur = cur
@@ -211,15 +220,18 @@ def list_accounts():
 
 @app.route("/api/accounts", methods=["POST"])
 def create_account():
-    data = request.get_json(force=True)
-    name = (data.get("name") or "").strip()
-    acc_type = data.get("type")
-    opening_balance = float(data.get("opening_balance") or 0)
-    opening_side = data.get("opening_side") or "debit"
-    if not name or acc_type not in ACCOUNT_TYPES:
-        return jsonify({"error": "name and a valid type are required"}), 400
-    db = get_db()
     try:
+        data = request.get_json(force=True)
+        name = (data.get("name") or "").strip()
+        acc_type = data.get("type")
+        try:
+            opening_balance = parse_float(data.get("opening_balance") or 0)
+        except ValueError:
+            return jsonify({"error": "Opening balance must be a valid number"}), 400
+        opening_side = data.get("opening_side") or "debit"
+        if not name or acc_type not in ACCOUNT_TYPES:
+            return jsonify({"error": "name and a valid type are required"}), 400
+        db = get_db()
         with db:
             cur = db.execute(
                 "INSERT INTO accounts (name, type, opening_balance, opening_side) VALUES (?,?,?,?)",
@@ -229,6 +241,8 @@ def create_account():
         return jsonify({"error": "an account with this name already exists"}), 400
     except sqlite3.Error as err:
         return jsonify({"error": f"Database error: {err}"}), 500
+    except Exception as err:
+        return jsonify({"error": f"Error: {err}"}), 500
     return jsonify({"id": cur.lastrowid}), 201
 
 
@@ -247,15 +261,18 @@ def delete_account(account_id):
 
 @app.route("/api/accounts/<int:account_id>", methods=["PUT"])
 def update_account(account_id):
-    data = request.get_json(force=True)
-    name = (data.get("name") or "").strip()
-    acc_type = data.get("type")
-    opening_balance = float(data.get("opening_balance") or 0)
-    opening_side = data.get("opening_side") or "debit"
-    if not name or acc_type not in ACCOUNT_TYPES:
-        return jsonify({"error": "name and a valid type are required"}), 400
-    db = get_db()
     try:
+        data = request.get_json(force=True)
+        name = (data.get("name") or "").strip()
+        acc_type = data.get("type")
+        try:
+            opening_balance = parse_float(data.get("opening_balance") or 0)
+        except ValueError:
+            return jsonify({"error": "Opening balance must be a valid number"}), 400
+        opening_side = data.get("opening_side") or "debit"
+        if not name or acc_type not in ACCOUNT_TYPES:
+            return jsonify({"error": "name and a valid type are required"}), 400
+        db = get_db()
         with db:
             db.execute(
                 "UPDATE accounts SET name=?, type=?, opening_balance=?, opening_side=? WHERE id=?",
@@ -265,6 +282,8 @@ def update_account(account_id):
         return jsonify({"error": "an account with this name already exists"}), 400
     except sqlite3.Error as err:
         return jsonify({"error": f"Database error: {err}"}), 500
+    except Exception as err:
+        return jsonify({"error": f"Error: {err}"}), 500
     return jsonify({"ok": True})
 
 
@@ -778,6 +797,71 @@ def report_stock():
             "closing_value": closing_value,
         })
     return jsonify(result)
+
+
+@app.route("/api/reports/item-ledger/<int:item_id>")
+def report_item_ledger(item_id):
+    db = get_db()
+    it = db.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+    if not it:
+        return jsonify({"error": "item not found"}), 404
+
+    from_date = request.args.get("from") or None
+    to_date = request.args.get("to") or None
+
+    pre_in_qty = pre_out_qty = 0.0
+    if from_date:
+        pre_rows = db.execute(
+            """SELECT direction, COALESCE(SUM(qty), 0) q
+               FROM voucher_items vi JOIN vouchers v ON v.id = vi.voucher_id
+               WHERE vi.item_id = ? AND v.date < ? GROUP BY direction""",
+            (item_id, from_date),
+        ).fetchall()
+        for m in pre_rows:
+            if m["direction"] == "in": pre_in_qty = m["q"]
+            else: pre_out_qty = m["q"]
+
+    opening_qty = it["opening_qty"] + pre_in_qty - pre_out_qty
+
+    clauses = ["vi.item_id = ?"]
+    params = [item_id]
+    if from_date:
+        clauses.append("v.date >= ?")
+        params.append(from_date)
+    if to_date:
+        clauses.append("v.date <= ?")
+        params.append(to_date)
+    where = " AND ".join(clauses)
+
+    rows = db.execute(
+        f"""SELECT v.date, v.type, v.narration, v.reference, vi.direction, vi.qty, vi.rate, vi.gst_rate, v.id as voucher_id
+           FROM voucher_items vi JOIN vouchers v ON v.id = vi.voucher_id
+           WHERE {where}
+           ORDER BY v.date, v.id""",
+        params,
+    ).fetchall()
+
+    ledger = []
+    running = opening_qty
+    for r in rows:
+        direction = r["direction"]
+        qty = r["qty"]
+        qty_in = qty if direction == "in" else 0.0
+        qty_out = qty if direction == "out" else 0.0
+        running += (qty_in - qty_out)
+        ledger.append({
+            "date": r["date"], "type": r["type"], "narration": r["narration"], "reference": r["reference"],
+            "voucher_id": r["voucher_id"], "direction": direction, "qty_in": qty_in, "qty_out": qty_out,
+            "rate": r["rate"], "gst_rate": r["gst_rate"], "amount": round(qty * r["rate"], 2),
+            "stock_balance": round(running, 4),
+        })
+
+    return jsonify({
+        "item": dict(it),
+        "opening_qty": round(opening_qty, 4),
+        "closing_qty": round(running, 4),
+        "rows": ledger,
+    })
 
 
 # ---------- Initialization and Server Orchestration ----------

@@ -575,13 +575,12 @@ def page_items():
             name = st.text_input("Name")
             unit = st.text_input("Unit", value="pcs")
             oq   = st.number_input("Opening Qty",  min_value=0.0, step=0.001, format="%.3f")
-            or_  = st.number_input("Opening Rate", min_value=0.0, step=0.01,  format="%.2f")
             if st.form_submit_button("Create"):
                 if not name.strip():
                     st.error("Name required.")
                 else:
                     nid = _next_id("Items")
-                    _append("Items", [nid, name.strip(), unit.strip() or "pcs", oq, or_])
+                    _append("Items", [nid, name.strip(), unit.strip() or "pcs", oq, 0.0])
                     st.success(f"Item '{name}' created.")
                     load_data(); st.rerun()
 
@@ -1731,6 +1730,202 @@ def page_ledger():
     
     st.metric("Closing Balance", f"₹{running:,.2f}")
 
+
+# ── Item Ledger ───────────────────────────────────────────────────
+def page_item_ledger():
+    st.title("📦 Item Ledger")
+    ensure_loaded()
+
+    it_df = items()
+    if it_df.empty:
+        st.info("No items found.")
+        return
+
+    item_map = {r["Name"]: r["ID"] for _, r in it_df.iterrows()}
+    sel      = st.selectbox("Select Item", list(item_map.keys()))
+
+    use_filter = st.checkbox("Filter by date range", key="item_led_filter")
+    from_d = to_d = None
+    if use_filter:
+        c1, c2 = st.columns(2)
+        from_d = c1.date_input("From", key="il_f")
+        to_d   = c2.date_input("To", value=date.today(), key="il_t")
+
+    item_id  = item_map[sel]
+    item_row = it_df[it_df["ID"] == item_id].iloc[0]
+    unit_str = item_row.get("Unit", "pcs") or "pcs"
+    oq_val   = float(item_row.get("Opening Qty", 0) or 0)
+
+    sl_all = stock_lines(); v_df = vouchers(); e_all = entries()
+
+    item_sl = pd.DataFrame()
+    if not sl_all.empty and not v_df.empty:
+        sl_sub = sl_all[sl_all["Item ID"] == item_id]
+        if not sl_sub.empty:
+            item_sl = sl_sub.merge(
+                v_df[["ID", "Date", "Type", "Reference", "Narration"]].rename(columns={"ID": "VID"}),
+                left_on="Voucher ID", right_on="VID",
+            ).sort_values(["Date", "VID"])
+
+            item_sl["Qty"] = pd.to_numeric(item_sl["Qty"], errors="coerce").fillna(0)
+            item_sl["Rate"] = pd.to_numeric(item_sl["Rate"], errors="coerce").fillna(0)
+            item_sl["GST Rate"] = pd.to_numeric(item_sl["GST Rate"], errors="coerce").fillna(0)
+
+    # Calculate opening stock balance prior to from_d
+    pre_in = 0.0
+    pre_out = 0.0
+    if not item_sl.empty and from_d:
+        pre_sl = item_sl[item_sl["Date"] < str(from_d)]
+        if not pre_sl.empty:
+            pre_in  = float(pre_sl[pre_sl["Direction"] == "in"]["Qty"].sum())
+            pre_out = float(pre_sl[pre_sl["Direction"] == "out"]["Qty"].sum())
+
+    base_qty = oq_val + pre_in - pre_out
+
+    # Filter by date range for display
+    display_sl = item_sl.copy() if not item_sl.empty else pd.DataFrame()
+    if not display_sl.empty:
+        if from_d: display_sl = display_sl[display_sl["Date"] >= str(from_d)]
+        if to_d:   display_sl = display_sl[display_sl["Date"] <= str(to_d)]
+
+    subtitle_lbl = f"Item: {sel} ({unit_str}) — "
+    if from_d and to_d: subtitle_lbl += f"Period: {from_d} to {to_d}"
+    elif from_d: subtitle_lbl += f"From {from_d} onward"
+    elif to_d: subtitle_lbl += f"Up to {to_d}"
+    else: subtitle_lbl += "All time"
+
+    rows = []
+    running_qty = base_qty
+    tot_in_period = 0.0
+    tot_out_period = 0.0
+
+    if not display_sl.empty:
+        for _, r in display_sl.iterrows():
+            qty = float(r["Qty"])
+            rate = float(r["Rate"])
+            gst_r = float(r["GST Rate"])
+            direction = str(r["Direction"]).lower()
+
+            qty_in  = qty if direction == "in" else 0.0
+            qty_out = qty if direction == "out" else 0.0
+            tot_in_period += qty_in
+            tot_out_period += qty_out
+
+            running_qty += (qty_in - qty_out)
+            line_val = qty * rate
+
+            vid = r["Voucher ID"]
+            party_str = ""
+            if not e_all.empty:
+                v_entries = e_all[e_all["Voucher ID"] == vid]
+                if not v_entries.empty and "Account Name" in v_entries.columns:
+                    account_names = [a for a in v_entries["Account Name"].unique() if a]
+                    if account_names:
+                        party_str = ", ".join(account_names)
+
+            rows.append({
+                "Date": r["Date"],
+                "Type": r["Type"],
+                "Reference": r["Reference"],
+                "Narration": r["Narration"],
+                "Party": party_str,
+                "Direction": direction,
+                "QtyIn": qty_in,
+                "QtyOut": qty_out,
+                "Rate": rate,
+                "GSTRate": gst_r,
+                "Amount": line_val,
+                "BalanceQty": round(running_qty, 4)
+            })
+
+    def build_item_ledger_table_html(is_printable=False):
+        border_style = "border-bottom: 1px dashed #ccc;" if is_printable else "border-bottom: 1px dashed #1f2937;"
+        double_border = "border-top: 2px solid #000; border-bottom: 2px double #000;" if is_printable else "border-top: 2px solid #374151; border-bottom: 2px double #374151;"
+        top_border = "border-bottom: 2px solid #000; border-top: 2px solid #000;" if is_printable else "border-bottom: 2px solid #374151;"
+        
+        html = f"""
+        <table style="width: 100%; border-collapse: collapse;">
+            <thead>
+                <tr style="{top_border}">
+                    <th style="padding: 6px 8px; text-align: left;">Date</th>
+                    <th style="padding: 6px 8px; text-align: left;">Type</th>
+                    <th style="padding: 6px 8px; text-align: left;">Reference / Party & Narration</th>
+                    <th style="padding: 6px 8px; text-align: right;">In Qty</th>
+                    <th style="padding: 6px 8px; text-align: right;">Out Qty</th>
+                    <th style="padding: 6px 8px; text-align: right;">Rate (₹)</th>
+                    <th style="padding: 6px 8px; text-align: right;">Total (₹)</th>
+                    <th style="padding: 6px 8px; text-align: right;">Stock Balance ({unit_str})</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr style="{border_style}">
+                    <td></td>
+                    <td></td>
+                    <td style="color: {'#555' if is_printable else '#7a93b0'}; font-style: italic;">Opening Balance</td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td></td>
+                    <td style="text-align: right; font-weight: bold;">{base_qty:,.3f} {unit_str}</td>
+                </tr>
+        """
+        for r in rows:
+            in_str   = f"{r['QtyIn']:,.3f}" if r['QtyIn'] > 0 else ""
+            out_str  = f"{r['QtyOut']:,.3f}" if r['QtyOut'] > 0 else ""
+            rate_str = f"{r['Rate']:,.2f}" if r['Rate'] > 0 else "—"
+            amt_str  = f"{r['Amount']:,.2f}" if r['Amount'] > 0 else "—"
+            bal_str  = f"{r['BalanceQty']:,.3f} {unit_str}"
+
+            narr_parts = []
+            if r["Reference"]: narr_parts.append(f"<b>Ref: {r['Reference']}</b>")
+            if r["Party"]: narr_parts.append(f"Account: {r['Party']}")
+            if r["Narration"]: narr_parts.append(r["Narration"])
+            if r["GSTRate"] > 0: narr_parts.append(f"GST: {r['GSTRate']}%")
+            narr_line = " — ".join(narr_parts) if narr_parts else "—"
+
+            badge_style = "" if is_printable else 'class="badge"'
+            
+            html += f"""
+                <tr style="{border_style}">
+                    <td style="white-space: nowrap;">{r['Date']}</td>
+                    <td><span {badge_style}>{r['Type']}</span></td>
+                    <td style="line-height: 1.4;">{narr_line}</td>
+                    <td style="text-align: right; color: {'#008000' if is_printable else '#4ade80'};">{in_str}</td>
+                    <td style="text-align: right; color: {'#cc0000' if is_printable else '#f87171'};">{out_str}</td>
+                    <td style="text-align: right;">{rate_str}</td>
+                    <td style="text-align: right;">{amt_str}</td>
+                    <td style="text-align: right; font-weight: 600;">{bal_str}</td>
+                </tr>
+            """
+            
+        html += f"""
+                <tr style="font-weight: bold; {double_border}">
+                    <td></td>
+                    <td></td>
+                    <td>Closing Stock Balance</td>
+                    <td style="text-align: right; color: {'#008000' if is_printable else '#4ade80'};">{tot_in_period:,.3f}</td>
+                    <td style="text-align: right; color: {'#cc0000' if is_printable else '#f87171'};">{tot_out_period:,.3f}</td>
+                    <td></td>
+                    <td></td>
+                    <td style="text-align: right;">{running_qty:,.3f} {unit_str}</td>
+                </tr>
+            </tbody>
+        </table>
+        """
+        return html
+
+    show_print_link("Item Ledger Statement", subtitle_lbl, build_item_ledger_table_html(is_printable=True))
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Opening Stock", f"{base_qty:,.3f} {unit_str}")
+    c2.metric("Total Inward", f"{tot_in_period:,.3f} {unit_str}")
+    c3.metric("Total Outward", f"{tot_out_period:,.3f} {unit_str}")
+    c4.metric("Closing Stock", f"{running_qty:,.3f} {unit_str}")
+
+    st.markdown(INLINE_CSS, unsafe_allow_html=True)
+    clean_item_led_html = "".join([line.strip() for line in build_item_ledger_table_html(is_printable=False).split("\n")])
+    st.markdown(f'<div class="report-table-wrapper">{clean_item_led_html}</div>', unsafe_allow_html=True)
+
 # ================================================================
 #  MAIN
 # ================================================================
@@ -1787,6 +1982,7 @@ def main():
             "📊 Balance Sheet",
             "📦 Stock",
             "📒 Account Ledger",
+            "📦 Item Ledger",
         ], label_visibility="collapsed")
         st.divider()
         if st.button("🔄 Refresh Data", use_container_width=True):
@@ -1804,6 +2000,7 @@ def main():
         "📊 Balance Sheet":  page_bs,
         "📦 Stock":          page_stock,
         "📒 Account Ledger": page_ledger,
+        "📦 Item Ledger":    page_item_ledger,
     }
     fn = pages.get(page)
     if fn: fn()
