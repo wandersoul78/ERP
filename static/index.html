@@ -1364,23 +1364,21 @@ function renderReports(){
       card.querySelector('#item-ledger-print').textContent = 'Item: ' + data.item.name + ' (' + data.item.unit + ') — ' + rangeLabel();
       const body = card.querySelector('#item-ledger-body');
       body.innerHTML='';
-      const tbl = el(`<table><thead><tr><th>Date</th><th>Type</th><th>Ref / Narration</th><th class="num">In Qty</th><th class="num">Out Qty</th><th class="num">Rate</th><th class="num">Amount</th><th class="num">Stock Balance</th></tr></thead><tbody></tbody></table>`);
+      const tbl = el(`<table><thead><tr><th>Date</th><th>Type</th><th>Ref / Narration</th><th class="num">In Qty</th><th class="num">Out Qty</th><th class="num">Stock Balance</th></tr></thead><tbody></tbody></table>`);
       const tbody = tbl.querySelector('tbody');
-      tbody.appendChild(el(`<tr><td></td><td></td><td class="muted">Opening Balance</td><td></td><td></td><td></td><td></td><td class="num font-bold">${fmt(data.opening_qty)} ${data.item.unit}</td></tr>`));
+      tbody.appendChild(el(`<tr><td></td><td></td><td class="muted">Opening Balance</td><td></td><td></td><td class="num font-bold">${fmt(data.opening_qty)} ${data.item.unit}</td></tr>`));
       data.rows.forEach(r=>{
         const refStr = r.reference ? `Ref: ${r.reference}` : '';
         const narrStr = [refStr, r.narration].filter(Boolean).join(' — ');
         const inStr = r.qty_in > 0 ? fmt(r.qty_in) : '';
         const outStr = r.qty_out > 0 ? fmt(r.qty_out) : '';
-        const rateStr = r.rate > 0 ? fmt(r.rate) : '—';
-        const amtStr = r.amount > 0 ? fmt(r.amount) : '—';
         tbody.appendChild(el(`<tr>
           <td>${r.date}</td><td><span class="badge">${r.type}</span></td><td>${narrStr || '—'}</td>
           <td class="num" style="color:var(--green);">${inStr}</td><td class="num" style="color:var(--red);">${outStr}</td>
-          <td class="num">${rateStr}</td><td class="num">${amtStr}</td><td class="num font-bold">${fmt(r.stock_balance)} ${data.item.unit}</td>
+          <td class="num font-bold">${fmt(r.stock_balance)} ${data.item.unit}</td>
         </tr>`));
       });
-      tbody.appendChild(el(`<tr style="font-weight:bold; border-top:2px solid var(--border);"><td></td><td></td><td>Closing Stock Balance</td><td></td><td></td><td></td><td></td><td class="num">${fmt(data.closing_qty)} ${data.item.unit}</td></tr>`));
+      tbody.appendChild(el(`<tr style="font-weight:bold; border-top:2px solid var(--border);"><td></td><td></td><td>Closing Stock Balance</td><td></td><td></td><td class="num">${fmt(data.closing_qty)} ${data.item.unit}</td></tr>`));
       body.appendChild(tbl);
     }
     sel.addEventListener('change', load);

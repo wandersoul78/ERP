@@ -1852,8 +1852,6 @@ def page_item_ledger():
                     <th style="padding: 6px 8px; text-align: left;">Reference / Party & Narration</th>
                     <th style="padding: 6px 8px; text-align: right;">In Qty</th>
                     <th style="padding: 6px 8px; text-align: right;">Out Qty</th>
-                    <th style="padding: 6px 8px; text-align: right;">Rate (₹)</th>
-                    <th style="padding: 6px 8px; text-align: right;">Total (₹)</th>
                     <th style="padding: 6px 8px; text-align: right;">Stock Balance ({unit_str})</th>
                 </tr>
             </thead>
@@ -1864,23 +1862,18 @@ def page_item_ledger():
                     <td style="color: {'#555' if is_printable else '#7a93b0'}; font-style: italic;">Opening Balance</td>
                     <td></td>
                     <td></td>
-                    <td></td>
-                    <td></td>
                     <td style="text-align: right; font-weight: bold;">{base_qty:,.3f} {unit_str}</td>
                 </tr>
         """
         for r in rows:
             in_str   = f"{r['QtyIn']:,.3f}" if r['QtyIn'] > 0 else ""
             out_str  = f"{r['QtyOut']:,.3f}" if r['QtyOut'] > 0 else ""
-            rate_str = f"{r['Rate']:,.2f}" if r['Rate'] > 0 else "—"
-            amt_str  = f"{r['Amount']:,.2f}" if r['Amount'] > 0 else "—"
             bal_str  = f"{r['BalanceQty']:,.3f} {unit_str}"
 
             narr_parts = []
             if r["Reference"]: narr_parts.append(f"<b>Ref: {r['Reference']}</b>")
             if r["Party"]: narr_parts.append(f"Account: {r['Party']}")
             if r["Narration"]: narr_parts.append(r["Narration"])
-            if r["GSTRate"] > 0: narr_parts.append(f"GST: {r['GSTRate']}%")
             narr_line = " — ".join(narr_parts) if narr_parts else "—"
 
             badge_style = "" if is_printable else 'class="badge"'
@@ -1892,8 +1885,6 @@ def page_item_ledger():
                     <td style="line-height: 1.4;">{narr_line}</td>
                     <td style="text-align: right; color: {'#008000' if is_printable else '#4ade80'};">{in_str}</td>
                     <td style="text-align: right; color: {'#cc0000' if is_printable else '#f87171'};">{out_str}</td>
-                    <td style="text-align: right;">{rate_str}</td>
-                    <td style="text-align: right;">{amt_str}</td>
                     <td style="text-align: right; font-weight: 600;">{bal_str}</td>
                 </tr>
             """
@@ -1905,8 +1896,6 @@ def page_item_ledger():
                     <td>Closing Stock Balance</td>
                     <td style="text-align: right; color: {'#008000' if is_printable else '#4ade80'};">{tot_in_period:,.3f}</td>
                     <td style="text-align: right; color: {'#cc0000' if is_printable else '#f87171'};">{tot_out_period:,.3f}</td>
-                    <td></td>
-                    <td></td>
                     <td style="text-align: right;">{running_qty:,.3f} {unit_str}</td>
                 </tr>
             </tbody>
