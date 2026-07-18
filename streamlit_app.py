@@ -1617,8 +1617,17 @@ def page_ledger():
     else: subtitle_lbl += "All time"
 
     rows, running = [], base
+    tot_dr = 0.0
+    tot_cr = 0.0
+    unit_qty_map = {}
+
     for _, r in ae.iterrows():
-        delta   = (r["Debit"]-r["Credit"]) if is_dr else (r["Credit"]-r["Debit"])
+        dr_val = float(r["Debit"]) if r["Debit"] > 0 else 0.0
+        cr_val = float(r["Credit"]) if r["Credit"] > 0 else 0.0
+        tot_dr += dr_val
+        tot_cr += cr_val
+
+        delta   = (dr_val - cr_val) if is_dr else (cr_val - dr_val)
         running += delta
         
         # Pull item movements for this specific voucher
@@ -1629,8 +1638,12 @@ def page_ledger():
             for _, itm in v_items.iterrows():
                 gst = f" + {itm['GST Rate']}%" if float(itm.get("GST Rate", 0) or 0) > 0 else ""
                 rate_str = f" @ ₹{float(itm['Rate']):,.2f}" if float(itm.get("Rate", 0) or 0) > 0 else ""
-                line = f"{itm['Item Name']} — {float(itm['Qty']):,.2f} {itm.get('Unit', '')}{rate_str}{gst}"
+                qty_val = float(itm.get("Qty", 0) or 0)
+                unit_val = str(itm.get("Unit", "pcs") or "pcs")
+                line = f"{itm['Item Name']} — {qty_val:,.2f} {unit_val}{rate_str}{gst}"
                 items_lines.append(line)
+
+                unit_qty_map[unit_val] = unit_qty_map.get(unit_val, 0.0) + qty_val
         
         rows.append({
             "Date": r["Date"],
@@ -1638,10 +1651,12 @@ def page_ledger():
             "Reference": r["Reference"],
             "Narration": r["Narration"],
             "Items": items_lines,
-            "Debit": r["Debit"] if r["Debit"] > 0 else 0,
-            "Credit": r["Credit"] if r["Credit"] > 0 else 0,
+            "Debit": dr_val,
+            "Credit": cr_val,
             "Balance": round(running, 2)
         })
+
+    tot_qty_label = ", ".join([f"{q:,.2f} {u}" for u, q in unit_qty_map.items()]) if unit_qty_map else ""
 
     def build_ledger_table_html(is_printable=False):
         border_style = "border-bottom: 1px dashed #ccc;" if is_printable else "border-bottom: 1px dashed #1f2937;"
@@ -1706,13 +1721,14 @@ def page_ledger():
             """
             
         cb_side = "Dr" if running >= 0 else "Cr"
+        qty_footer_note = f' <span style="font-size:12px; font-weight:normal; opacity:0.85;">(Total Qty: {tot_qty_label})</span>' if tot_qty_label else ''
         html += f"""
                 <tr style="font-weight: bold; {double_border}">
                     <td></td>
                     <td></td>
-                    <td>Closing Balance</td>
-                    <td></td>
-                    <td></td>
+                    <td>Closing Balance{qty_footer_note}</td>
+                    <td style="text-align: right;">{tot_dr:,.2f}</td>
+                    <td style="text-align: right;">{tot_cr:,.2f}</td>
                     <td style="text-align: right;">{abs(running):,.2f} {cb_side}</td>
                 </tr>
             </tbody>
@@ -1722,13 +1738,17 @@ def page_ledger():
 
     show_print_link("Account Ledger Statement", subtitle_lbl, build_ledger_table_html(is_printable=True))
 
-    st.metric("Opening Balance", f"₹{base:,.2f}")
-    
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Opening Balance", f"₹{base:,.2f}")
+    if tot_qty_label:
+        c2.metric("Total Quantity Transacted", tot_qty_label)
+    else:
+        c2.metric("Total Transactions", f"{len(rows)} entries")
+    c3.metric("Closing Balance", f"₹{running:,.2f}")
+
     st.markdown(INLINE_CSS, unsafe_allow_html=True)
     clean_ledger_html = "".join([line.strip() for line in build_ledger_table_html(is_printable=False).split("\n")])
     st.markdown(f'<div class="report-table-wrapper">{clean_ledger_html}</div>', unsafe_allow_html=True)
-    
-    st.metric("Closing Balance", f"₹{running:,.2f}")
 
 
 # ── Item Ledger ───────────────────────────────────────────────────

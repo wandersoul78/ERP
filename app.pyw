@@ -597,10 +597,25 @@ def report_ledger(account_id):
             "balance": round(running, 2),
         })
 
+    v_ids = [r["voucher_id"] for r in rows]
+    unit_qty_map = {}
+    if v_ids:
+        placeholders = ",".join(["?"] * len(v_ids))
+        items_moved = db.execute(
+            f"""SELECT vi.qty, i.unit FROM voucher_items vi JOIN items i ON i.id = vi.item_id WHERE vi.voucher_id IN ({placeholders})""",
+            v_ids
+        ).fetchall()
+        for im in items_moved:
+            u = im["unit"] or "pcs"
+            unit_qty_map[u] = unit_qty_map.get(u, 0.0) + im["qty"]
+
+    tot_qty_str = ", ".join([f"{round(q, 2):,.2f} {u}" for u, q in unit_qty_map.items()]) if unit_qty_map else ""
+
     return jsonify({
         "account": dict(acc),
         "opening_balance": round(balance, 2),
         "closing_balance": round(running, 2),
+        "total_qty": tot_qty_str,
         "entries": ledger,
     })
 

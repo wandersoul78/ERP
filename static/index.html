@@ -1207,7 +1207,8 @@ function renderReports(){
     async function load(){
       selectedLedgerAccount = sel.value;
       const data = await api('/reports/ledger/'+sel.value+dateParams());
-      card.querySelector('#ledger-acc-print').textContent = 'Account: ' + data.account.name + ' — ' + rangeLabel();
+      const qtySuffix = data.total_qty ? ' (Total Qty: ' + data.total_qty + ')' : '';
+      card.querySelector('#ledger-acc-print').textContent = 'Account: ' + data.account.name + qtySuffix + ' — ' + rangeLabel();
       const body = card.querySelector('#ledger-body');
       body.innerHTML='';
       const tbl = el(`<table><thead><tr><th>Date</th><th>Type</th><th>Narration</th><th class="num">Debit</th><th class="num">Credit</th><th class="num">Balance</th></tr></thead><tbody></tbody></table>`);
@@ -1229,7 +1230,7 @@ function renderReports(){
         row.querySelector('td:last-child').innerHTML = balLabel(r.balance);
         tbody.appendChild(row);
       });
-      const cbRow = el(`<tr><td colspan="5" style="font-weight:600;">Closing balance</td><td class="num" style="font-weight:600;"></td></tr>`);
+      const cbRow = el(`<tr><td colspan="5" style="font-weight:600;">Closing balance ${qtySuffix}</td><td class="num" style="font-weight:600;"></td></tr>`);
       cbRow.querySelector('td:last-child').innerHTML = balLabel(data.closing_balance);
       tbody.appendChild(cbRow);
       body.appendChild(tbl);
