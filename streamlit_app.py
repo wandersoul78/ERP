@@ -300,26 +300,20 @@ def compute_stock(from_d=None, to_d=None):
                 )
                 if from_d: lines = lines[lines["Date"] >= str(from_d)]
                 if to_d:   lines = lines[lines["Date"] <= str(to_d)]
-                for col in ("Qty", "Rate"):
-                    lines[col] = pd.to_numeric(lines[col], errors="coerce").fillna(0)
+                if "Qty" in lines.columns:
+                    lines["Qty"] = pd.to_numeric(lines["Qty"], errors="coerce").fillna(0)
 
         in_l  = lines[lines["Direction"] == "in"]  if not lines.empty else pd.DataFrame()
         out_l = lines[lines["Direction"] == "out"] if not lines.empty else pd.DataFrame()
         q_in  = float(in_l["Qty"].sum())  if not in_l.empty else 0
         q_out = float(out_l["Qty"].sum()) if not out_l.empty else 0
-        v_in  = float((in_l["Qty"] * in_l["Rate"]).sum()) if not in_l.empty else 0
 
         oq = float(it.get("Opening Qty",  0) or 0)
-        or_ = float(it.get("Opening Rate", 0) or 0)
-        ov  = oq * or_
-        tot_q = oq + q_in
-        tot_v = ov + v_in
-        avg_r = tot_v / tot_q if tot_q > 0 else 0
-        cq    = round(oq + q_in - q_out, 4)
+        cq = round(oq + q_in - q_out, 4)
         result.append({
             "Item": it["Name"], "Unit": it["Unit"],
             "Opening": round(oq, 2), "In": round(q_in, 2), "Out": round(q_out, 2),
-            "Closing": cq, "Avg Rate": round(avg_r, 2), "Value": round(cq * avg_r, 2),
+            "Closing": cq,
         })
     return result
 
@@ -1432,7 +1426,6 @@ def page_stock():
 
     def build_stock_table_html(is_printable=False):
         border_style = "border-bottom: 1px dashed #ccc;" if is_printable else "border-bottom: 1px dashed #1f2937;"
-        double_border = "border-top: 2px solid #000; border-bottom: 2px double #000;" if is_printable else "border-top: 2px solid #374151; border-bottom: 2px double #374151;"
         top_border = "border-bottom: 2px solid #000; border-top: 2px solid #000;" if is_printable else "border-bottom: 2px solid #374151;"
         
         html = f"""
@@ -1444,15 +1437,11 @@ def page_stock():
                     <th style="padding: 6px 8px; text-align: right;">In</th>
                     <th style="padding: 6px 8px; text-align: right;">Out</th>
                     <th style="padding: 6px 8px; text-align: right;">Closing</th>
-                    <th style="padding: 6px 8px; text-align: right;">Avg Rate</th>
-                    <th style="padding: 6px 8px; text-align: right;">Value</th>
                 </tr>
             </thead>
             <tbody>
         """
-        total_val = 0.0
         for s in stock:
-            total_val += s['Value']
             html += f"""
                 <tr style="{border_style}">
                     <td style="padding: 6px 8px;">{s['Item']} <span style="font-size:11px; opacity:0.75;">({s['Unit']})</span></td>
@@ -1460,15 +1449,9 @@ def page_stock():
                     <td style="padding: 6px 8px; text-align: right;">{s['In']:,.2f}</td>
                     <td style="padding: 6px 8px; text-align: right;">{s['Out']:,.2f}</td>
                     <td style="padding: 6px 8px; text-align: right;">{s['Closing']:,.2f}</td>
-                    <td style="padding: 6px 8px; text-align: right;">{s['Avg Rate']:,.2f}</td>
-                    <td style="padding: 6px 8px; text-align: right;">{s['Value']:,.2f}</td>
                 </tr>
             """
         html += f"""
-                <tr style="font-weight: bold; {double_border}">
-                    <td colspan="6" style="padding: 6px 8px;">Total stock value</td>
-                    <td style="padding: 6px 8px; text-align: right;">{total_val:,.2f}</td>
-                </tr>
             </tbody>
         </table>
         """
