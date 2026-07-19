@@ -674,15 +674,22 @@ def page_accounts():
             ob      = st.number_input("Opening Balance", min_value=0.0, step=0.01, format="%.2f")
             ob_side = st.radio("Opening Side", ["debit", "credit"], horizontal=True)
             if st.form_submit_button("Create"):
+                acc_names = [str(n).strip().lower() for n in accs["Name"].values] if not accs.empty else []
                 if not name.strip():
                     st.error("Name required.")
-                elif not accs.empty and name.strip() in accs["Name"].values:
-                    st.error("Account already exists.")
+                elif name.strip().lower() in acc_names:
+                    st.error(f"Account '{name.strip()}' already exists.")
                 else:
-                    nid = _next_id("Accounts")
-                    _append("Accounts", [nid, name.strip(), typ, ob, ob_side])
-                    st.success(f"Account '{name}' created (ID {nid}).")
-                    load_data(); st.rerun()
+                    try:
+                        nid = _next_id("Accounts")
+                        _append("Accounts", [nid, name.strip(), typ, ob, ob_side])
+                        st.success(f"Account '{name}' created (ID {nid}).")
+                        load_data(); st.rerun()
+                    except Exception as ex:
+                        if "UniqueViolation" in type(ex).__name__ or "unique constraint" in str(ex).lower() or "already exists" in str(ex).lower():
+                            st.error(f"Account '{name.strip()}' already exists in the database.")
+                        else:
+                            st.error(f"Error creating account: {ex}")
 
     if not accs.empty:
         with st.expander("✏️ Edit / Delete Account"):
@@ -703,14 +710,21 @@ def page_accounts():
                 delete_clicked = c2.form_submit_button("❌ Delete Account")
                 
                 if save_clicked:
+                    acc_names = [str(n).strip().lower() for n in accs["Name"].values]
                     if not new_name.strip():
                         st.error("Name required.")
-                    elif new_name.strip() != acc_row["Name"] and new_name.strip() in accs["Name"].values:
+                    elif new_name.strip().lower() != str(acc_row["Name"]).strip().lower() and new_name.strip().lower() in acc_names:
                         st.error("Account name already exists.")
                     else:
-                        _update_row_where("Accounts", "ID", acc_id, [acc_id, new_name.strip(), new_typ, new_ob, new_ob_side])
-                        st.success(f"Account '{new_name}' updated.")
-                        load_data(); st.rerun()
+                        try:
+                            _update_row_where("Accounts", "ID", acc_id, [acc_id, new_name.strip(), new_typ, new_ob, new_ob_side])
+                            st.success(f"Account '{new_name}' updated.")
+                            load_data(); st.rerun()
+                        except Exception as ex:
+                            if "UniqueViolation" in type(ex).__name__ or "unique constraint" in str(ex).lower() or "already exists" in str(ex).lower():
+                                st.error(f"Account '{new_name.strip()}' already exists in the database.")
+                            else:
+                                st.error(f"Error updating account: {ex}")
                 
                 if delete_clicked:
                     ents = entries()
@@ -739,13 +753,22 @@ def page_items():
             unit = st.text_input("Unit", value="pcs")
             oq   = st.number_input("Opening Qty",  min_value=0.0, step=0.01, format="%.2f")
             if st.form_submit_button("Create"):
+                item_names = [str(n).strip().lower() for n in it_df["Name"].values] if not it_df.empty else []
                 if not name.strip():
                     st.error("Name required.")
+                elif name.strip().lower() in item_names:
+                    st.error(f"Item '{name.strip()}' already exists.")
                 else:
-                    nid = _next_id("Items")
-                    _append("Items", [nid, name.strip(), unit.strip() or "pcs", oq, 0.0])
-                    st.success(f"Item '{name}' created.")
-                    load_data(); st.rerun()
+                    try:
+                        nid = _next_id("Items")
+                        _append("Items", [nid, name.strip(), unit.strip() or "pcs", oq, 0.0])
+                        st.success(f"Item '{name}' created.")
+                        load_data(); st.rerun()
+                    except Exception as ex:
+                        if "UniqueViolation" in type(ex).__name__ or "unique constraint" in str(ex).lower() or "already exists" in str(ex).lower():
+                            st.error(f"Item '{name.strip()}' already exists in the database.")
+                        else:
+                            st.error(f"Error creating item: {ex}")
 
     if not it_df.empty:
         with st.expander("✏️ Edit / Delete Item"):
@@ -766,14 +789,21 @@ def page_items():
                 delete_clicked = c2.form_submit_button("❌ Delete Item")
                 
                 if save_clicked:
+                    item_names = [str(n).strip().lower() for n in it_df["Name"].values]
                     if not new_name.strip():
                         st.error("Name required.")
-                    elif new_name.strip() != it_row["Name"] and new_name.strip() in it_df["Name"].values:
+                    elif new_name.strip().lower() != str(it_row["Name"]).strip().lower() and new_name.strip().lower() in item_names:
                         st.error("Item name already exists.")
                     else:
-                        _update_row_where("Items", "ID", it_id, [it_id, new_name.strip(), new_unit.strip() or "pcs", new_oq, new_or])
-                        st.success(f"Item '{new_name}' updated.")
-                        load_data(); st.rerun()
+                        try:
+                            _update_row_where("Items", "ID", it_id, [it_id, new_name.strip(), new_unit.strip() or "pcs", new_oq, new_or])
+                            st.success(f"Item '{new_name}' updated.")
+                            load_data(); st.rerun()
+                        except Exception as ex:
+                            if "UniqueViolation" in type(ex).__name__ or "unique constraint" in str(ex).lower() or "already exists" in str(ex).lower():
+                                st.error(f"Item '{new_name.strip()}' already exists in the database.")
+                            else:
+                                st.error(f"Error updating item: {ex}")
                 
                 if delete_clicked:
                     sl_all = stock_lines()
