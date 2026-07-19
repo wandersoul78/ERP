@@ -229,17 +229,9 @@ def fix_past_production_voucher_quantities_conn(conn):
         rows = cur.fetchall()
         for vi_id, v_id, item_id, current_qty in rows:
             bom_unit_qty = get_bom_unit_qty(item_id)
-            if bom_unit_qty > 1.0:
-                cur.execute("""
-                    SELECT COALESCE(SUM(qty), 0)
-                    FROM voucher_items
-                    WHERE voucher_id = %s AND direction = 'out'
-                """, (v_id,))
-                res = cur.fetchone()
-                raw_out_sum = float(res[0]) if res else 0.0
+            if bom_unit_qty > 1.0 and current_qty < 500:
                 expected_qty = round(current_qty * bom_unit_qty, 2)
-                if raw_out_sum > 0 and abs(raw_out_sum - expected_qty) < 0.5:
-                    cur.execute("UPDATE voucher_items SET qty = %s WHERE id = %s", (expected_qty, vi_id))
+                cur.execute("UPDATE voucher_items SET qty = %s WHERE id = %s", (expected_qty, vi_id))
         conn.commit()
     except Exception:
         try:
