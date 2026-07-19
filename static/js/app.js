@@ -21,10 +21,10 @@ function el(html){
 }
 
 async function loadAll(){
-  const [accounts, items, vouchers] = await Promise.all([
-    api('/accounts'), api('/items'), api('/vouchers')
+  const [accounts, items, vouchers, formulas] = await Promise.all([
+    api('/accounts'), api('/items'), api('/vouchers'), api('/formulas').catch(()=>[])
   ]);
-  STATE.accounts = accounts; STATE.items = items; STATE.vouchers = vouchers;
+  STATE.accounts = accounts; STATE.items = items; STATE.vouchers = vouchers; STATE.formulas = formulas || [];
 }
 
 function switchTab(tab){
@@ -144,6 +144,14 @@ function renderVoucherForm(){
 
       <div id="inventory-section">
         <h2 style="font-size:14px; margin-top:22px;">Inventory movement</h2>
+        <div id="bom-autofill-box" style="display:none; background:rgba(168,121,47,0.08); padding:14px; border-radius:4px; margin-bottom:14px; border:1px solid var(--paper-line);">
+          <h3 style="font-size:13px; margin:0 0 10px; font-family:'IBM Plex Mono',monospace;">🧪 Auto-Fill Raw Materials &amp; Finished Product from BOM Formula</h3>
+          <div class="grid2">
+            <div><label>Finished Product</label><select id="bom-prod-item-sel"></select></div>
+            <div><label>Lots / Batch Qty Produced</label><input type="number" step="1" min="1" id="bom-prod-lots" value="1"></div>
+          </div>
+          <button type="button" class="btn secondary" id="btn-apply-bom-prod" style="margin-top:8px;">⚡ Auto-Populate Rows</button>
+        </div>
         <div id="itemlines"></div>
         <button class="btn secondary" id="add-item" type="button">+ Add item line</button>
       </div>
@@ -330,12 +338,56 @@ function renderVoucherForm(){
     t.textContent = `Debit ${fmt(d)}  ·  Credit ${fmt(c)}  ·  ${balanced ? 'Balanced ✓' : 'Difference ' + fmt(d-c)}`;
   }
 
+  function addItemRowWithVals(itemId = null, dir = 'in', qty = '', rate = 0){
+    addItemRow();
+    const rows = itemsDiv.querySelectorAll('.item-row');
+    const lastRow = rows[rows.length - 1];
+    if(!lastRow) return;
+    if(itemId) lastRow.querySelector('.i-item').value = String(itemId);
+    lastRow.querySelector('.i-dir').value = dir;
+    if(qty) lastRow.querySelector('.i-qty').value = String(qty);
+    if(rate) lastRow.querySelector('.i-rate').value = String(rate);
+  }
+
   function updateSectionVisibility(type){
     const showLedger = type !== 'production';
     const showInventory = type === 'sales' || type === 'purchase' || type === 'production';
     ledgerSection.style.display = showLedger ? 'block' : 'none';
     inventorySection.style.display = showInventory ? 'block' : 'none';
+    
+    const bomBox = form.querySelector('#bom-autofill-box');
+    if(bomBox){
+      bomBox.style.display = type === 'production' ? 'block' : 'none';
+      if(type === 'production'){
+        const sel = bomBox.querySelector('#bom-prod-item-sel');
+        sel.innerHTML = STATE.items.map(i=>`<option value="${i.id}">${i.name}</option>`).join('');
+      }
+    }
     if(!showInventory) itemsDiv.innerHTML = '';
+  }
+
+  const applyBomBtn = form.querySelector('#btn-apply-bom-prod');
+  if(applyBomBtn){
+    applyBomBtn.addEventListener('click', ()=>{
+      const finishedId = Number(form.querySelector('#bom-prod-item-sel').value);
+      const lots = Number(form.querySelector('#bom-prod-lots').value || 1);
+      const matchingFormulas = (STATE.formulas || []).filter(f => f.finished_item_id === finishedId);
+
+      if(!matchingFormulas || matchingFormulas.length === 0){
+        alert("No BOM formula defined for this product. Set formula under Items -> Set Formula first.");
+        return;
+      }
+
+      itemsDiv.innerHTML = '';
+      // Row 0: Finished Product IN
+      addItemRowWithVals(finishedId, 'in', lots, 0);
+
+      // Rows 1..N: Raw Materials OUT
+      matchingFormulas.forEach(f => {
+        const rawQty = Number(f.qty_required || 0) * lots;
+        addItemRowWithVals(f.raw_item_id, 'out', rawQty.toFixed(4), 0);
+      });
+    });
   }
 
   vTypeSelect.addEventListener('change', () => {
@@ -891,6 +943,87 @@ function renderItems(){
   });
   list.appendChild(tbl);
   wrap.appendChild(list);
+
+  // ---------- BOM Formula Manager Card ----------
+  if(STATE.items.length > 0){
+    const bomCard = el(`<div class="card">
+      <h2>🧪 Set / Edit Bill of Materials (BOM) Formula</h2>
+      <div class="muted" style="margin-bottom:12px;">Define raw material ratios needed to produce 1 Lot / Unit of a finished product. Updating a formula does not alter past vouchers.</div>
+      <div id="bom-msg"></div>
+      <label>Select Finished Product</label>
+      <select id="bom-finished-sel" style="margin-bottom:16px;">
+        ${STATE.items.map(i=>`<option value="${i.id}">${i.name}</option>`).join('')}
+      </select>
+      <div id="bom-rows-container"></div>
+      <button class="btn" id="bom-save-btn" type="button" style="margin-top:12px;">💾 Save Formula (BOM)</button>
+    </div>`);
+
+    const finishedSel = bomCard.querySelector('#bom-finished-sel');
+    const rowsContainer = bomCard.querySelector('#bom-rows-container');
+    const saveBtn = bomCard.querySelector('#bom-save-btn');
+    const msgDiv = bomCard.querySelector('#bom-msg');
+
+    function renderBomRows(){
+      rowsContainer.innerHTML = '';
+      const finishedId = Number(finishedSel.value);
+      const existing = (STATE.formulas || []).filter(f => f.finished_item_id === finishedId);
+      
+      const itemOpts = ['<option value="0">-- None --</option>', ...STATE.items.filter(i=>i.id!==finishedId).map(i=>`<option value="${i.id}">${i.name} (${i.unit})</option>`)].join('');
+
+      for(let idx=0; idx<7; idx++){
+        const ex = existing[idx];
+        const defId = ex ? ex.raw_item_id : 0;
+        const defQty = ex ? ex.qty_required : '';
+
+        const rowEl = el(`<div class="grid2" style="margin-bottom:8px; align-items:center;">
+          <div>
+            <label style="font-size:11px;">Raw Material #${idx+1}</label>
+            <select class="bom-raw-sel">${itemOpts}</select>
+          </div>
+          <div>
+            <label style="font-size:11px;">Qty per 1 Lot</label>
+            <input type="number" step="0.0001" min="0" class="bom-raw-qty" placeholder="Qty" value="${defQty}">
+          </div>
+        </div>`);
+
+        if(defId) rowEl.querySelector('.bom-raw-sel').value = String(defId);
+        rowsContainer.appendChild(rowEl);
+      }
+    }
+
+    finishedSel.addEventListener('change', renderBomRows);
+    renderBomRows();
+
+    saveBtn.addEventListener('click', async ()=>{
+      msgDiv.innerHTML = '';
+      const finishedId = Number(finishedSel.value);
+      const rawRows = rowsContainer.querySelectorAll('.grid2');
+      const raw_materials = [];
+
+      rawRows.forEach(r => {
+        const raw_item_id = Number(r.querySelector('.bom-raw-sel').value);
+        const qty_required = Number(r.querySelector('.bom-raw-qty').value || 0);
+        if(raw_item_id > 0 && qty_required > 0){
+          raw_materials.push({ raw_item_id, qty_required });
+        }
+      });
+
+      try {
+        await api(`/items/${finishedId}/formula`, {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ raw_materials })
+        });
+        msgDiv.innerHTML = `<div class="msg ok">Formula saved with ${raw_materials.length} raw material(s).</div>`;
+        await loadAll();
+      } catch(err) {
+        msgDiv.innerHTML = `<div class="msg error">${err.message}</div>`;
+      }
+    });
+
+    wrap.appendChild(bomCard);
+  }
+
   return wrap;
 }
 

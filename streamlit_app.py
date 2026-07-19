@@ -138,9 +138,68 @@ def load_data():
         df_sl.rename(columns={"id": "ID", "voucher_id": "Voucher ID", "item_id": "Item ID", "item_name": "Item Name", "direction": "Direction", "qty": "Qty", "rate": "Rate", "gst_rate": "GST Rate"}, inplace=True)
         st.session_state["stock_lines"] = df_sl
 
+        # Formulas
+        ensure_formulas_table_conn(conn)
+        try:
+            df_f = pd.read_sql_query("""
+                SELECT f.id, f.finished_item_id, fi.name AS finished_item_name,
+                       f.raw_item_id, ri.name AS raw_item_name, ri.unit AS raw_unit, f.qty_required
+                FROM item_formulas f
+                JOIN items fi ON fi.id = f.finished_item_id
+                JOIN items ri ON ri.id = f.raw_item_id
+            """, conn)
+            st.session_state["formulas"] = df_f
+        except Exception:
+            st.session_state["formulas"] = pd.DataFrame()
+
         st.session_state["loaded_at"] = datetime.now().strftime("%H:%M:%S")
     except Exception as err:
         st.error(f"Error loading database tables: {err}")
+    finally:
+        release_connection(conn)
+
+def ensure_formulas_table_conn(conn):
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS item_formulas (
+                id SERIAL PRIMARY KEY,
+                finished_item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                raw_item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                qty_required REAL NOT NULL DEFAULT 0,
+                CONSTRAINT unique_finished_raw UNIQUE (finished_item_id, raw_item_id)
+            );
+        """)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+def save_formula_for_item(finished_item_id: int, raw_materials_list: list):
+    if not DATABASE_URL:
+        return
+    conn = get_connection()
+    if not conn:
+        return
+    try:
+        ensure_formulas_table_conn(conn)
+        cur = conn.cursor()
+        cur.execute("DELETE FROM item_formulas WHERE finished_item_id = %s", (finished_item_id,))
+        for rm in raw_materials_list:
+            raw_id = rm["raw_item_id"]
+            qty_req = rm["qty_required"]
+            if raw_id and qty_req > 0:
+                cur.execute(
+                    "INSERT INTO item_formulas (finished_item_id, raw_item_id, qty_required) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (finished_item_id, raw_item_id) DO UPDATE SET qty_required = EXCLUDED.qty_required",
+                    (finished_item_id, raw_id, qty_req)
+                )
+        conn.commit()
+    except Exception as err:
+        conn.rollback()
+        raise err
     finally:
         release_connection(conn)
 
@@ -153,6 +212,7 @@ def items()       -> pd.DataFrame: return st.session_state.get("items", pd.DataF
 def vouchers()    -> pd.DataFrame: return st.session_state.get("vouchers", pd.DataFrame())
 def entries()     -> pd.DataFrame: return st.session_state.get("entries", pd.DataFrame())
 def stock_lines() -> pd.DataFrame: return st.session_state.get("stock_lines", pd.DataFrame())
+def formulas()    -> pd.DataFrame: return st.session_state.get("formulas", pd.DataFrame())
 
 # ================================================================
 #  WRITE HELPERS (BATCHED & POOLED)
@@ -725,6 +785,60 @@ def page_items():
                         st.success(f"Item '{sel_it_name}' deleted.")
                         load_data(); st.rerun()
 
+        with st.expander("🧪 Set / Edit Bill of Materials (BOM) Formula"):
+            st.caption("Define standard raw material ratios required to produce 1 Lot / Unit of a finished product. Updating a formula does not alter past vouchers.")
+            it_names = list(it_df["Name"].values)
+            sel_f_name = st.selectbox("Select Finished Product Item", it_names, key="bom_sel_f")
+            f_id = int(it_df[it_df["Name"] == sel_f_name].iloc[0]["ID"])
+
+            conn = get_connection()
+            existing_formula = []
+            if conn:
+                try:
+                    ensure_formulas_table_conn(conn)
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT f.raw_item_id, i.name, f.qty_required FROM item_formulas f JOIN items i ON i.id = f.raw_item_id WHERE f.finished_item_id = %s",
+                        (f_id,)
+                    )
+                    existing_formula = cur.fetchall()
+                except Exception:
+                    pass
+                finally:
+                    release_connection(conn)
+
+            st.markdown(f"**Formula Ingredients for 1 Lot / Unit of `{sel_f_name}`:**")
+            
+            with st.form(f"form_bom_{f_id}"):
+                raw_inputs = []
+                rm_options = ["-- None --"] + [n for n in it_names if n != sel_f_name]
+
+                for idx in range(7):
+                    c_rm, c_qty = st.columns([3, 2])
+                    
+                    def_rm = "-- None --"
+                    def_qty = 0.0
+                    if idx < len(existing_formula):
+                        ex_id, ex_name, ex_qty = existing_formula[idx]
+                        if ex_name in rm_options:
+                            def_rm = ex_name
+                            def_qty = float(ex_qty)
+
+                    rm_sel = c_rm.selectbox(f"Raw Material #{idx+1}", rm_options, index=rm_options.index(def_rm) if def_rm in rm_options else 0, key=f"bom_rm_{f_id}_{idx}")
+                    rm_qty = c_qty.number_input(f"Qty per 1 Lot #{idx+1}", min_value=0.0, step=0.01, value=def_qty, format="%.4f", key=f"bom_qty_{f_id}_{idx}")
+
+                    if rm_sel != "-- None --" and rm_qty > 0:
+                        raw_id = int(it_df[it_df["Name"] == rm_sel].iloc[0]["ID"])
+                        raw_inputs.append({"raw_item_id": raw_id, "qty_required": rm_qty})
+
+                if st.form_submit_button("💾 Save Formula (BOM)", type="primary"):
+                    try:
+                        save_formula_for_item(f_id, raw_inputs)
+                        st.success(f"Formula saved for '{sel_f_name}' with {len(raw_inputs)} raw material(s).")
+                        load_data(); st.rerun()
+                    except Exception as err:
+                        st.error(f"Error saving formula: {err}")
+
 # ── Vouchers ──────────────────────────────────────────────────────
 def page_vouchers():
     st.title("📑 Vouchers")
@@ -881,6 +995,61 @@ def page_vouchers():
         st.markdown("**Stock Movements** (In / Out)")
         if it_df.empty:
             st.warning("No items found. Add items first."); return
+
+        with st.expander("🧪 Auto-Fill Production Lines from BOM Formula", expanded=True):
+            bom_items = list(it_map.keys())
+            c_bi, c_bl, c_btn = st.columns([3, 2, 2])
+            sel_bom_item = c_bi.selectbox("Select Output Finished Product", bom_items, key="bom_prod_item")
+            batch_lots = c_bl.number_input("Batch / Lot Qty Produced", min_value=0.01, step=1.0, value=1.0, key="bom_prod_lots")
+            
+            if c_btn.button("⚡ Auto-Fill Rows", key="btn_autofill_bom", type="primary"):
+                finished_id = it_map[sel_bom_item]
+                conn = get_connection()
+                df_bom = pd.DataFrame()
+                if conn:
+                    try:
+                        ensure_formulas_table_conn(conn)
+                        df_bom = pd.read_sql_query(
+                            "SELECT f.raw_item_id, i.name AS raw_name, f.qty_required FROM item_formulas f JOIN items i ON i.id = f.raw_item_id WHERE f.finished_item_id = %s",
+                            conn, params=(finished_id,)
+                        )
+                    except Exception:
+                        pass
+                    finally:
+                        release_connection(conn)
+
+                if df_bom.empty:
+                    st.warning(f"No BOM formula set for '{sel_bom_item}'. Set formula under Items -> Set Formula first.")
+                else:
+                    # Clean up old row keys
+                    for j in range(st.session_state.get("inv_rows", 1)):
+                        st.session_state.pop(f"v_item_{j}", None)
+                        st.session_state.pop(f"v_dir_{j}", None)
+                        st.session_state.pop(f"v_qty_{j}", None)
+                        st.session_state.pop(f"v_rate_{j}", None)
+                        st.session_state.pop(f"v_gst_{j}", None)
+
+                    total_inv_rows = 1 + len(df_bom)
+                    st.session_state.inv_rows = total_inv_rows
+
+                    # Row 0: Finished Product IN
+                    st.session_state["v_item_0"] = sel_bom_item
+                    st.session_state["v_dir_0"] = "in"
+                    st.session_state["v_qty_0"] = float(batch_lots)
+                    st.session_state["v_rate_0"] = 0.0
+                    st.session_state["v_gst_0"] = 0.0
+
+                    # Rows 1..N: Raw Materials OUT
+                    for r_idx, r_row in df_bom.iterrows():
+                        row_num = r_idx + 1
+                        st.session_state[f"v_item_{row_num}"] = r_row["raw_name"]
+                        st.session_state[f"v_dir_{row_num}"] = "out"
+                        st.session_state[f"v_qty_{row_num}"] = round(float(r_row["qty_required"]) * float(batch_lots), 4)
+                        st.session_state[f"v_rate_{row_num}"] = 0.0
+                        st.session_state[f"v_gst_{row_num}"] = 0.0
+
+                    st.success(f"Auto-filled {len(df_bom)} raw material line(s) for {batch_lots} lot(s) of '{sel_bom_item}'.")
+                    st.rerun()
 
         stock_entries = []
         for j in range(st.session_state.inv_rows):

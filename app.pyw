@@ -175,6 +175,14 @@ CREATE TABLE IF NOT EXISTS voucher_items (
     rate REAL NOT NULL,
     gst_rate REAL NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS item_formulas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    finished_item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    raw_item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+    qty_required REAL NOT NULL DEFAULT 0,
+    UNIQUE(finished_item_id, raw_item_id)
+);
 """
 
 
@@ -326,10 +334,45 @@ def delete_item(item_id):
         "SELECT COUNT(*) c FROM voucher_items WHERE item_id=?", (item_id,)
     ).fetchone()["c"]
     if used:
-        return jsonify({"error": "cannot delete an item that has voucher movements"}), 400
+        return jsonify({"error": "cannot delete an item that has inventory movements"}), 400
     db.execute("DELETE FROM items WHERE id=?", (item_id,))
     db.commit()
     return jsonify({"ok": True})
+
+
+@app.route("/api/formulas", methods=["GET"])
+def list_formulas():
+    db = get_db()
+    rows = db.execute("""
+        SELECT f.id, f.finished_item_id, fi.name AS finished_item_name,
+               f.raw_item_id, ri.name AS raw_item_name, ri.unit AS raw_unit, f.qty_required
+        FROM item_formulas f
+        JOIN items fi ON fi.id = f.finished_item_id
+        JOIN items ri ON ri.id = f.raw_item_id
+        ORDER BY fi.name, ri.name
+    """).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route("/api/items/<int:finished_id>/formula", methods=["POST", "PUT"])
+def save_item_formula_api(finished_id):
+    data = request.get_json(force=True)
+    raw_materials = data.get("raw_materials") or []
+    db = get_db()
+    try:
+        with db:
+            db.execute("DELETE FROM item_formulas WHERE finished_item_id = ?", (finished_id,))
+            for rm in raw_materials:
+                raw_id = int(rm.get("raw_item_id") or 0)
+                qty_req = parse_float(rm.get("qty_required") or 0)
+                if raw_id and qty_req > 0:
+                    db.execute(
+                        "INSERT INTO item_formulas (finished_item_id, raw_item_id, qty_required) VALUES (?,?,?)",
+                        (finished_id, raw_id, qty_req)
+                    )
+        return jsonify({"ok": True})
+    except Exception as err:
+        return jsonify({"error": str(err)}), 500
 
 
 @app.route("/api/items/<int:item_id>", methods=["PUT"])
