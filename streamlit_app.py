@@ -403,7 +403,7 @@ def _update_voucher_transaction(v_id, ev_date, v_type, ev_ref, ev_nar, ev_entrie
             sl_id = cur.fetchone()[0]
             stock_tuples = [
                 (sl_id + idx, v_id, s["item_id"], s["direction"], s["qty"], s["rate"], s["gst_rate"])
-                for idx, s in enumerate(stock_entries)
+                for idx, s in enumerate(ev_stock_entries)
             ]
             cur.executemany(
                 "INSERT INTO voucher_items (id, voucher_id, item_id, direction, qty, rate, gst_rate) VALUES (%s, %s, %s, %s, %s, %s, %s)",
@@ -1401,12 +1401,20 @@ def page_vouchers():
                 ev_inv_rows = st.session_state[f"ev_inv_rows_{sel_v_id}"]
                 
                 for j in range(ev_inv_rows):
-                    c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
-                    itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"ev_item_{sel_v_id}_{j}")
-                    dire = c2.selectbox("Direction", ["in", "out"],        key=f"ev_dir_{sel_v_id}_{j}")
-                    qty  = c3.number_input("Qty",      min_value=0.01, step=0.01, key=f"ev_qty_{sel_v_id}_{j}", format="%.2f")
-                    rate = c4.number_input("Rate",     min_value=0.0,   step=0.01,  key=f"ev_rate_{sel_v_id}_{j}", format="%.2f")
-                    gst  = c5.number_input("GST %",   min_value=0.0,   step=0.5,   key=f"ev_gst_{sel_v_id}_{j}", format="%.1f")
+                    if is_prod:
+                        c1, c2, c3 = st.columns([4, 2, 3])
+                        itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"ev_item_{sel_v_id}_{j}")
+                        dire = c2.selectbox("Direction", ["in", "out"],        key=f"ev_dir_{sel_v_id}_{j}")
+                        qty  = c3.number_input("Qty",      min_value=0.01, step=0.01, key=f"ev_qty_{sel_v_id}_{j}", format="%.2f")
+                        rate = 0.0
+                        gst  = 0.0
+                    else:
+                        c1, c2, c3, c4, c5 = st.columns([3, 2, 2, 2, 2])
+                        itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"ev_item_{sel_v_id}_{j}")
+                        dire = c2.selectbox("Direction", ["in", "out"],        key=f"ev_dir_{sel_v_id}_{j}")
+                        qty  = c3.number_input("Qty",      min_value=0.01, step=0.01, key=f"ev_qty_{sel_v_id}_{j}", format="%.2f")
+                        rate = c4.number_input("Rate",     min_value=0.0,   step=0.01,  key=f"ev_rate_{sel_v_id}_{j}", format="%.2f")
+                        gst  = c5.number_input("GST %",   min_value=0.0,   step=0.5,   key=f"ev_gst_{sel_v_id}_{j}", format="%.1f")
                     ev_stock_entries.append({"item_id": it_map[itm], "item_name": itm,
                                           "direction": dire, "qty": qty, "rate": rate, "gst_rate": gst})
 
