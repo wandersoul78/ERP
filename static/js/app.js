@@ -54,41 +54,59 @@ function renderDashboard(){
   const stat = el(`
     <div class="statgrid">
       <div class="card stat">
-        <div class="l">Accounts</div>
+        <div class="l">Account Ledgers</div>
         <div class="v">${STATE.accounts.length}</div>
       </div>
       <div class="card stat">
-        <div class="l">Items tracked</div>
+        <div class="l">Items Tracked</div>
         <div class="v">${STATE.items.length}</div>
       </div>
       <div class="card stat">
-        <div class="l">Vouchers recorded</div>
+        <div class="l">Vouchers Recorded</div>
         <div class="v">${STATE.vouchers.length}</div>
       </div>
     </div>
   `);
   wrap.appendChild(stat);
 
-  const recent = el(`<div class="card"><h2>Recent activity</h2></div>`);
-  const tbl = el(`<table>
-    <thead><tr><th>Date</th><th>Type</th><th>Narration</th><th class="num">Amount</th></tr></thead>
-    <tbody></tbody></table>`);
-  const tbody = tbl.querySelector('tbody');
-  if(STATE.vouchers.length===0){
-    recent.appendChild(el(`<div class="empty">No vouchers yet — record your first one under "New Voucher".</div>`));
+  const ledgerCard = el(`<div class="card"><h2>Account Ledgers &amp; Closing Balances</h2></div>`);
+  if(STATE.accounts.length === 0){
+    ledgerCard.appendChild(el(`<div class="empty">No accounts added yet.</div>`));
   } else {
-    STATE.vouchers.slice(0,8).forEach(v=>{
-      const amt = v.entries.reduce((s,e)=>s+Number(e.debit||0),0);
+    const tbl = el(`<table>
+      <thead><tr><th>Account Name</th><th>Category</th><th class="num">Closing Balance</th></tr></thead>
+      <tbody></tbody></table>`);
+    const tbody = tbl.querySelector('tbody');
+
+    STATE.accounts.forEach(a => {
+      let dr = 0, cr = 0;
+      STATE.vouchers.forEach(v => {
+        if(v.entries){
+          v.entries.forEach(e => {
+            if(e.account_id === a.id || e.account_name === a.name){
+              dr += Number(e.debit || 0);
+              cr += Number(e.credit || 0);
+            }
+          });
+        }
+      });
+
+      const isDr = a.type === 'asset' || a.type === 'expense';
+      const ob = Number(a.opening_balance || 0);
+      const obSide = a.opening_side || 'debit';
+      const base = obSide === (isDr ? 'debit' : 'credit') ? ob : -ob;
+      const net = base + (isDr ? (dr - cr) : (cr - dr));
+      const sideStr = net >= 0 ? (isDr ? 'Dr' : 'Cr') : (isDr ? 'Cr' : 'Dr');
+
       tbody.appendChild(el(`<tr>
-        <td>${v.date}</td>
-        <td><span class="pill ${v.type}">${v.type}</span></td>
-        <td>${v.narration||'—'}</td>
-        <td class="num">${fmt(amt)}</td>
+        <td><strong>${a.name}</strong></td>
+        <td><span class="pill ${a.type}">${a.type}</span></td>
+        <td class="num"><strong>₹${fmt(Math.abs(net))}</strong> <span class="muted">${sideStr}</span></td>
       </tr>`));
     });
-    recent.appendChild(tbl);
+    ledgerCard.appendChild(tbl);
   }
-  wrap.appendChild(recent);
+  wrap.appendChild(ledgerCard);
   return wrap;
 }
 

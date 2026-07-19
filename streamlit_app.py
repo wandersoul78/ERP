@@ -529,32 +529,69 @@ def page_dashboard():
     v_df = vouchers()
     e_df = entries()
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Vouchers", len(v_df) if not v_df.empty else 0)
-    c2.metric("Accounts", len(accs) if not accs.empty else 0)
-
+    # Calculate P&L & Cash Balance
     _, _, ti, te, np_ = compute_pl()
-    c3.metric("Net Profit / Loss", f"₹{np_:,.2f}")
 
-    # Cash balance
+    cash_bank_bal = 0.0
     if not accs.empty and not e_df.empty:
-        cash = accs[accs["Name"].str.lower() == "cash"]
-        if not cash.empty:
-            cr = cash.iloc[0]
-            ae = e_df[e_df["Account ID"] == cr["ID"]]
-            for col in ("Debit", "Credit"):
-                ae = ae.copy()
-                ae[col] = pd.to_numeric(ae[col], errors="coerce").fillna(0)
-            ob = float(cr.get("Opening Balance", 0) or 0)
-            base = ob if cr.get("Opening Side") == "debit" else -ob
-            cash_bal = round(base + ae["Debit"].sum() - ae["Credit"].sum(), 2)
-            c4.metric("Cash Balance", f"₹{cash_bal:,.2f}")
+        merged = _merge_entries_vouchers()
+        for _, r in accs.iterrows():
+            if r["Name"].lower() in ("cash", "bank"):
+                ae = merged[merged["Account ID"] == r["ID"]] if not merged.empty else pd.DataFrame()
+                d = ae["Debit"].sum() if not ae.empty else 0
+                c = ae["Credit"].sum() if not ae.empty else 0
+                ob = float(r.get("Opening Balance", 0) or 0)
+                base = ob if r.get("Opening Side") == "debit" else -ob
+                cash_bank_bal += (base + d - c)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Vouchers Recorded", len(v_df) if not v_df.empty else 0)
+    c2.metric("Total Accounts", len(accs) if not accs.empty else 0)
+    c3.metric("Net Profit / Loss", f"₹{np_:,.2f}")
+    c4.metric("Liquid Cash / Bank", f"₹{cash_bank_bal:,.2f}")
 
     st.caption(f"Data as of: {st.session_state.get('loaded_at', '—')}  ·  Sheet: {SHEET_NAME}")
+    st.divider()
 
-    if not v_df.empty:
-        st.subheader("Recent Vouchers")
-        st.dataframe(v_df.head(10), use_container_width=True, hide_index=True)
+    col_left, col_right = st.columns([3, 2])
+
+    with col_left:
+        st.subheader("🏦 Account Ledgers & Closing Balances")
+        if not accs.empty:
+            merged = _merge_entries_vouchers()
+            acc_rows = []
+            for _, r in accs.iterrows():
+                is_dr = r["Type"] in ("asset", "expense")
+                ae = merged[merged["Account ID"] == r["ID"]] if not merged.empty else pd.DataFrame()
+                d = ae["Debit"].sum() if not ae.empty else 0
+                c = ae["Credit"].sum() if not ae.empty else 0
+                delta = (d - c) if is_dr else (c - d)
+                natural = "debit" if is_dr else "credit"
+                ob = float(r.get("Opening Balance", 0) or 0)
+                ob_side = str(r.get("Opening Side", "debit"))
+                base = ob if ob_side == natural else -ob
+                closing_bal = round(base + delta, 2)
+                
+                side_str = "Dr" if closing_bal >= 0 and is_dr else ("Cr" if closing_bal >= 0 else ("Dr" if not is_dr else "Cr"))
+                
+                acc_rows.append({
+                    "Account Name": r["Name"],
+                    "Category": r["Type"].capitalize(),
+                    "Closing Balance": f"₹{abs(closing_bal):,.2f} {side_str}"
+                })
+            df_acc_summary = pd.DataFrame(acc_rows)
+            st.dataframe(df_acc_summary, use_container_width=True, hide_index=True)
+        else:
+            st.info("No accounts found.")
+
+    with col_right:
+        st.subheader("📦 Stock Inventory Quick-View")
+        stock_summary = compute_stock()
+        if stock_summary:
+            df_stock = pd.DataFrame(stock_summary)[["Item", "Unit", "Closing"]]
+            st.dataframe(df_stock, use_container_width=True, hide_index=True)
+        else:
+            st.info("No stock items recorded.")
 
     if st.button("🔄 Refresh"):
         load_data(); st.rerun()
