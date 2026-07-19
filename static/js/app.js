@@ -145,12 +145,12 @@ function renderVoucherForm(){
       <div id="inventory-section">
         <h2 style="font-size:14px; margin-top:22px;">Inventory movement</h2>
         <div id="bom-autofill-box" style="display:none; background:rgba(168,121,47,0.08); padding:14px; border-radius:4px; margin-bottom:14px; border:1px solid var(--paper-line);">
-          <h3 style="font-size:13px; margin:0 0 10px; font-family:'IBM Plex Mono',monospace;">🧪 Auto-Fill Raw Materials &amp; Finished Product from BOM Formula</h3>
-          <div class="grid2">
-            <div><label>Finished Product</label><select id="bom-prod-item-sel"></select></div>
-            <div><label>Lots / Batch Qty Produced</label><input type="number" step="1" min="1" id="bom-prod-lots" value="1"></div>
+          <h3 style="font-size:13px; margin:0 0 10px; font-family:'IBM Plex Mono',monospace;">🧪 Auto-Fill Production Lines from BOM Formula</h3>
+          <div id="bom-finished-items-container"></div>
+          <div style="display:flex; gap:10px; margin-top:8px; align-items:center;">
+            <button type="button" class="btn secondary" id="btn-add-bom-item-row" style="font-size:12px; padding:4px 10px;">+ Add Item</button>
+            <button type="button" class="btn secondary" id="btn-apply-bom-prod" style="margin-left:auto;">⚡ Auto-Populate Rows</button>
           </div>
-          <button type="button" class="btn secondary" id="btn-apply-bom-prod" style="margin-top:8px;">⚡ Auto-Populate Rows</button>
         </div>
         <div id="itemlines"></div>
         <button class="btn secondary" id="add-item" type="button">+ Add item line</button>
@@ -349,6 +349,55 @@ function renderVoucherForm(){
     if(rate) lastRow.querySelector('.i-rate').value = String(rate);
   }
 
+  const applyBomBtn = form.querySelector('#btn-apply-bom-prod');
+  if(applyBomBtn){
+    applyBomBtn.addEventListener('click', ()=>{
+      const pRows = form.querySelectorAll('#bom-finished-items-container .bom-item-p-row');
+      if(!pRows.length) return;
+
+      const stockInMap = {}; // finishedId -> totalLots
+      const rawOutMap = {};   // rawId -> totalQty
+      let missingFormulas = [];
+
+      pRows.forEach(r => {
+        const finishedId = Number(r.querySelector('.bom-p-item').value);
+        const lots = Number(r.querySelector('.bom-p-lots').value || 1);
+        const itemObj = STATE.items.find(i=>i.id===finishedId);
+        const itemName = itemObj ? itemObj.name : 'Item';
+
+        stockInMap[finishedId] = (stockInMap[finishedId] || 0) + lots;
+
+        const matchingFormulas = (STATE.formulas || []).filter(f => f.finished_item_id === finishedId);
+        if(!matchingFormulas || matchingFormulas.length === 0){
+          if(!missingFormulas.includes(itemName)) missingFormulas.push(itemName);
+        } else {
+          matchingFormulas.forEach(f => {
+            const rawNeeded = Number(f.qty_required || 0) * lots;
+            rawOutMap[f.raw_item_id] = (rawOutMap[f.raw_item_id] || 0) + rawNeeded;
+          });
+        }
+      });
+
+      if(missingFormulas.length > 0){
+        alert(`No BOM formula defined for: ${missingFormulas.join(', ')}. Set formula under Items -> Set Formula first.`);
+      }
+
+      itemsDiv.innerHTML = '';
+
+      // Stock IN rows for finished products
+      Object.keys(stockInMap).forEach(fId => {
+        addItemRowWithVals(Number(fId), 'in', stockInMap[fId].toFixed(2), 0);
+      });
+
+      // Stock OUT rows for consolidated raw materials
+      Object.keys(rawOutMap).forEach(rId => {
+        addItemRowWithVals(Number(rId), 'out', rawOutMap[rId].toFixed(2), 0);
+      });
+
+      updateProductionRowFields();
+    });
+  }
+
   function updateSectionVisibility(type){
     const showLedger = type !== 'production';
     const showInventory = type === 'sales' || type === 'purchase' || type === 'production';
@@ -359,35 +408,11 @@ function renderVoucherForm(){
     if(bomBox){
       bomBox.style.display = type === 'production' ? 'block' : 'none';
       if(type === 'production'){
-        const sel = bomBox.querySelector('#bom-prod-item-sel');
-        sel.innerHTML = STATE.items.map(i=>`<option value="${i.id}">${i.name}</option>`).join('');
+        renderBomItemRows();
       }
     }
     if(!showInventory) itemsDiv.innerHTML = '';
-  }
-
-  const applyBomBtn = form.querySelector('#btn-apply-bom-prod');
-  if(applyBomBtn){
-    applyBomBtn.addEventListener('click', ()=>{
-      const finishedId = Number(form.querySelector('#bom-prod-item-sel').value);
-      const lots = Number(form.querySelector('#bom-prod-lots').value || 1);
-      const matchingFormulas = (STATE.formulas || []).filter(f => f.finished_item_id === finishedId);
-
-      if(!matchingFormulas || matchingFormulas.length === 0){
-        alert("No BOM formula defined for this product. Set formula under Items -> Set Formula first.");
-        return;
-      }
-
-      itemsDiv.innerHTML = '';
-      // Row 0: Finished Product IN
-      addItemRowWithVals(finishedId, 'in', lots, 0);
-
-      // Rows 1..N: Raw Materials OUT
-      matchingFormulas.forEach(f => {
-        const rawQty = Number(f.qty_required || 0) * lots;
-        addItemRowWithVals(f.raw_item_id, 'out', rawQty.toFixed(2), 0);
-      });
-    });
+    updateProductionRowFields();
   }
 
   vTypeSelect.addEventListener('change', () => {

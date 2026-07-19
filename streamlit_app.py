@@ -998,30 +998,70 @@ def page_vouchers():
 
         with st.expander("🧪 Auto-Fill Production Lines from BOM Formula", expanded=True):
             bom_items = list(it_map.keys())
-            c_bi, c_bl, c_btn = st.columns([3, 2, 2])
-            sel_bom_item = c_bi.selectbox("Select Output Finished Product", bom_items, key="bom_prod_item")
-            batch_lots = c_bl.number_input("Batch / Lot Qty Produced", min_value=0.01, step=1.0, value=1.0, key="bom_prod_lots")
-            
-            if c_btn.button("⚡ Auto-Fill Rows", key="btn_autofill_bom", type="primary"):
-                finished_id = it_map[sel_bom_item]
+            if "bom_prod_item_rows" not in st.session_state:
+                st.session_state["bom_prod_item_rows"] = 1
+
+            selected_finished_items = []
+            for p_idx in range(st.session_state["bom_prod_item_rows"]):
+                c_bi, c_bl = st.columns([3, 2])
+                sel_item = c_bi.selectbox(f"Finished Product #{p_idx+1}", bom_items, key=f"bom_p_item_{p_idx}")
+                lots_val = c_bl.number_input(f"Lots / Batch Qty #{p_idx+1}", min_value=0.01, step=1.0, value=1.0, key=f"bom_p_lots_{p_idx}", format="%.2f")
+                selected_finished_items.append((sel_item, float(lots_val)))
+
+            c_add_p, c_rm_p, c_btn_af = st.columns([2, 2, 3])
+            if c_add_p.button("+ Add Item", key="btn_add_p_item"):
+                st.session_state["bom_prod_item_rows"] += 1
+                st.rerun()
+            if c_rm_p.button("- Remove", key="btn_rm_p_item") and st.session_state["bom_prod_item_rows"] > 1:
+                p_last = st.session_state["bom_prod_item_rows"] - 1
+                st.session_state.pop(f"bom_p_item_{p_last}", None)
+                st.session_state.pop(f"bom_p_lots_{p_last}", None)
+                st.session_state["bom_prod_item_rows"] -= 1
+                st.rerun()
+
+            if c_btn_af.button("⚡ Auto-Fill Rows", key="btn_autofill_bom", type="primary"):
                 conn = get_connection()
-                df_bom = pd.DataFrame()
+                all_bom_df = pd.DataFrame()
                 if conn:
                     try:
                         ensure_formulas_table_conn(conn)
-                        df_bom = pd.read_sql_query(
-                            "SELECT f.raw_item_id, i.name AS raw_name, f.qty_required FROM item_formulas f JOIN items i ON i.id = f.raw_item_id WHERE f.finished_item_id = %s",
-                            conn, params=(finished_id,)
+                        all_bom_df = pd.read_sql_query(
+                            "SELECT f.finished_item_id, fi.name AS finished_name, f.raw_item_id, ri.name AS raw_name, f.qty_required "
+                            "FROM item_formulas f "
+                            "JOIN items fi ON fi.id = f.finished_item_id "
+                            "JOIN items ri ON ri.id = f.raw_item_id",
+                            conn
                         )
                     except Exception:
                         pass
                     finally:
                         release_connection(conn)
 
-                if df_bom.empty:
-                    st.warning(f"No BOM formula set for '{sel_bom_item}'. Set formula under Items -> Set Formula first.")
-                else:
-                    # Clean up old row keys
+                stock_in_dict = {}
+                raw_out_dict = {}
+                missing_formulas = []
+
+                for f_item_name, f_lots in selected_finished_items:
+                    stock_in_dict[f_item_name] = stock_in_dict.get(f_item_name, 0.0) + f_lots
+                    
+                    f_id = it_map[f_item_name]
+                    if not all_bom_df.empty:
+                        sub_bom = all_bom_df[all_bom_df["finished_item_id"] == f_id]
+                    else:
+                        sub_bom = pd.DataFrame()
+
+                    if sub_bom.empty:
+                        missing_formulas.append(f_item_name)
+                    else:
+                        for _, r_row in sub_bom.iterrows():
+                            r_name = r_row["raw_name"]
+                            needed = float(r_row["qty_required"]) * f_lots
+                            raw_out_dict[r_name] = raw_out_dict.get(r_name, 0.0) + needed
+
+                if missing_formulas:
+                    st.warning(f"No BOM formula set for: {', '.join(missing_formulas)}. Set formula under Items -> Set Formula first.")
+
+                if stock_in_dict:
                     for j in range(st.session_state.get("inv_rows", 1)):
                         st.session_state.pop(f"v_item_{j}", None)
                         st.session_state.pop(f"v_dir_{j}", None)
@@ -1029,37 +1069,37 @@ def page_vouchers():
                         st.session_state.pop(f"v_rate_{j}", None)
                         st.session_state.pop(f"v_gst_{j}", None)
 
-                    total_inv_rows = 1 + len(df_bom)
-                    st.session_state.inv_rows = total_inv_rows
+                    total_rows = len(stock_in_dict) + len(raw_out_dict)
+                    st.session_state.inv_rows = total_rows
 
-                    # Row 0: Finished Product IN
-                    st.session_state["v_item_0"] = sel_bom_item
-                    st.session_state["v_dir_0"] = "in"
-                    st.session_state["v_qty_0"] = float(batch_lots)
-                    st.session_state["v_rate_0"] = 0.0
-                    st.session_state["v_gst_0"] = 0.0
+                    row_idx = 0
+                    for f_name, f_qty in stock_in_dict.items():
+                        st.session_state[f"v_item_{row_idx}"] = f_name
+                        st.session_state[f"v_dir_{row_idx}"] = "in"
+                        st.session_state[f"v_qty_{row_idx}"] = round(f_qty, 2)
+                        st.session_state[f"v_rate_{row_idx}"] = 0.0
+                        st.session_state[f"v_gst_{row_idx}"] = 0.0
+                        row_idx += 1
 
-                    # Rows 1..N: Raw Materials OUT
-                    for r_idx, r_row in df_bom.iterrows():
-                        row_num = r_idx + 1
-                        st.session_state[f"v_item_{row_num}"] = r_row["raw_name"]
-                        st.session_state[f"v_dir_{row_num}"] = "out"
-                        st.session_state[f"v_qty_{row_num}"] = round(float(r_row["qty_required"]) * float(batch_lots), 2)
-                        st.session_state[f"v_rate_{row_num}"] = 0.0
-                        st.session_state[f"v_gst_{row_num}"] = 0.0
+                    for r_name, r_qty in raw_out_dict.items():
+                        st.session_state[f"v_item_{row_idx}"] = r_name
+                        st.session_state[f"v_dir_{row_idx}"] = "out"
+                        st.session_state[f"v_qty_{row_idx}"] = round(r_qty, 2)
+                        st.session_state[f"v_rate_{row_idx}"] = 0.0
+                        st.session_state[f"v_gst_{row_idx}"] = 0.0
+                        row_idx += 1
 
-                    st.success(f"Auto-filled {len(df_bom)} raw material line(s) for {batch_lots} lot(s) of '{sel_bom_item}'.")
+                    st.success(f"Auto-filled {len(stock_in_dict)} finished product(s) and {len(raw_out_dict)} consolidated raw material line(s).")
                     st.rerun()
 
         stock_entries = []
         for j in range(st.session_state.inv_rows):
-            c1, c2, c3, c4 = st.columns([3, 2, 2, 2])
+            c1, c2, c3 = st.columns([4, 2, 3])
             itm  = c1.selectbox("Item",      list(it_map.keys()), key=f"v_item_{j}")
             dire = c2.selectbox("Direction", ["in", "out"],        key=f"v_dir_{j}")
             qty  = c3.number_input("Qty",  min_value=0.01, step=0.01, key=f"v_qty_{j}", format="%.2f")
-            rate = c4.number_input("Rate", min_value=0.0,   step=0.01,  key=f"v_rate_{j}", format="%.2f")
             stock_entries.append({"item_id": it_map[itm], "item_name": itm,
-                                   "direction": dire, "qty": qty, "rate": rate, "gst_rate": 0})
+                                   "direction": dire, "qty": qty, "rate": 0.0, "gst_rate": 0})
 
         col1, col2 = st.columns(2)
         if col1.button("+ Row", key="prod_add"):
