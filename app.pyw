@@ -118,18 +118,47 @@ def _after_write(response):
         _trigger_sync()
     return response
 
+from psycopg2 import pool
+
+DB_POOL = None
+
+def get_db_pool():
+    global DB_POOL
+    if DB_POOL is None:
+        DB_POOL = pool.ThreadedConnectionPool(
+            1, 10, DATABASE_URL,
+            keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=5
+        )
+    return DB_POOL
+
 def get_db():
     if "db" not in g:
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.cursor_factory = RealDictCursor
-        g.db = DbWrapper(conn)
+        try:
+            p = get_db_pool()
+            conn = p.getconn()
+            conn.cursor_factory = RealDictCursor
+            g.db_conn = conn
+            g.db = DbWrapper(conn)
+        except Exception:
+            conn = psycopg2.connect(DATABASE_URL)
+            conn.cursor_factory = RealDictCursor
+            g.db_conn = conn
+            g.db = DbWrapper(conn)
     return g.db
 
 @app.teardown_appcontext
 def close_db(exception=None):
     db = g.pop("db", None)
-    if db is not None:
-        db.close()
+    conn = g.pop("db_conn", None)
+    if conn is not None:
+        try:
+            p = get_db_pool()
+            p.putconn(conn)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 SCHEMA = """
