@@ -152,20 +152,6 @@ def load_data():
         except Exception:
             st.session_state["formulas"] = pd.DataFrame()
 
-        # Fix past production voucher quantities if they were recorded as lot sizes instead of total weight/qty
-        try:
-            fix_past_production_voucher_quantities_conn(conn)
-            # Reload stock lines if updated
-            df_sl = pd.read_sql_query("""
-                SELECT vi.id, vi.voucher_id, vi.item_id, i.name AS item_name, vi.direction, vi.qty, vi.rate, vi.gst_rate
-                FROM voucher_items vi
-                JOIN items i ON i.id = vi.item_id
-            """, conn)
-            df_sl.rename(columns={"id": "ID", "voucher_id": "Voucher ID", "item_id": "Item ID", "item_name": "Item Name", "direction": "Direction", "qty": "Qty", "rate": "Rate", "gst_rate": "GST Rate"}, inplace=True)
-            st.session_state["stock_lines"] = df_sl
-        except Exception:
-            pass
-
         st.session_state["loaded_at"] = datetime.now().strftime("%H:%M:%S")
     except Exception as err:
         st.error(f"Error loading database tables: {err}")
@@ -214,30 +200,6 @@ def get_bom_unit_qty(finished_item_id: int) -> float:
             finally:
                 release_connection(conn)
     return 1.0
-
-def fix_past_production_voucher_quantities_conn(conn):
-    if not conn:
-        return
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT vi.id, vi.voucher_id, vi.item_id, vi.qty
-            FROM voucher_items vi
-            JOIN vouchers v ON v.id = vi.voucher_id
-            WHERE v.type = 'production' AND vi.direction = 'in'
-        """)
-        rows = cur.fetchall()
-        for vi_id, v_id, item_id, current_qty in rows:
-            bom_unit_qty = get_bom_unit_qty(item_id)
-            if bom_unit_qty > 1.0 and current_qty < 500:
-                expected_qty = round(current_qty * bom_unit_qty, 2)
-                cur.execute("UPDATE voucher_items SET qty = %s WHERE id = %s", (expected_qty, vi_id))
-        conn.commit()
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
 
 def save_formula_for_item(finished_item_id: int, raw_materials_list: list):
     if not DATABASE_URL:
