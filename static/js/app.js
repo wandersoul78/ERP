@@ -21,10 +21,20 @@ function el(html){
 }
 
 async function loadAll(){
-  const [accounts, items, vouchers, formulas] = await Promise.all([
-    api('/accounts'), api('/items'), api('/vouchers'), api('/formulas').catch(()=>[])
-  ]);
-  STATE.accounts = accounts; STATE.items = items; STATE.vouchers = vouchers; STATE.formulas = formulas || [];
+  try {
+    const [accounts, items, vouchers, formulas] = await Promise.all([
+      api('/accounts').catch(()=>[]),
+      api('/items').catch(()=>[]),
+      api('/vouchers').catch(()=>[]),
+      api('/formulas').catch(()=>[])
+    ]);
+    STATE.accounts = Array.isArray(accounts) ? accounts : [];
+    STATE.items = Array.isArray(items) ? items : [];
+    STATE.vouchers = Array.isArray(vouchers) ? vouchers : [];
+    STATE.formulas = Array.isArray(formulas) ? formulas : [];
+  } catch(e) {
+    console.error("loadAll error:", e);
+  }
 }
 
 function switchTab(tab){
@@ -307,14 +317,15 @@ function renderVoucherForm(){
 
   function applyDefaultAccountsForType(type){
     entriesDiv.innerHTML = '';
+    if (!STATE.accounts || STATE.accounts.length === 0) return;
     if(type === 'sales') {
-      const cashAcc  = STATE.accounts.find(a => a.name === 'Cash');
-      const salesAcc = STATE.accounts.find(a => a.name === 'Sales');
+      const cashAcc  = STATE.accounts.find(a => a.name.toLowerCase().includes('cash'));
+      const salesAcc = STATE.accounts.find(a => a.name.toLowerCase().includes('sales'));
       addEntryRow('', null, cashAcc  ? cashAcc.id  : null);
       addEntryRow('', null, salesAcc ? salesAcc.id : null);
     } else if(type === 'purchase') {
-      const pAcc    = STATE.accounts.find(a => a.name === 'Purchases');
-      const cashAcc = STATE.accounts.find(a => a.name === 'Cash');
+      const pAcc    = STATE.accounts.find(a => a.name.toLowerCase().includes('purchase'));
+      const cashAcc = STATE.accounts.find(a => a.name.toLowerCase().includes('cash'));
       addEntryRow('', null, pAcc    ? pAcc.id    : null);
       addEntryRow('', null, cashAcc ? cashAcc.id : null);
     } else {
