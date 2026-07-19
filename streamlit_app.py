@@ -152,6 +152,20 @@ def load_data():
         except Exception:
             st.session_state["formulas"] = pd.DataFrame()
 
+        # Fix past production voucher quantities if they were recorded as lot sizes instead of total weight/qty
+        try:
+            fix_past_production_voucher_quantities_conn(conn)
+            # Reload stock lines if updated
+            df_sl = pd.read_sql_query("""
+                SELECT vi.id, vi.voucher_id, vi.item_id, i.name AS item_name, vi.direction, vi.qty, vi.rate, vi.gst_rate
+                FROM voucher_items vi
+                JOIN items i ON i.id = vi.item_id
+            """, conn)
+            df_sl.rename(columns={"id": "ID", "voucher_id": "Voucher ID", "item_id": "Item ID", "item_name": "Item Name", "direction": "Direction", "qty": "Qty", "rate": "Rate", "gst_rate": "GST Rate"}, inplace=True)
+            st.session_state["stock_lines"] = df_sl
+        except Exception:
+            pass
+
         st.session_state["loaded_at"] = datetime.now().strftime("%H:%M:%S")
     except Exception as err:
         st.error(f"Error loading database tables: {err}")
@@ -170,6 +184,62 @@ def ensure_formulas_table_conn(conn):
                 CONSTRAINT unique_finished_raw UNIQUE (finished_item_id, raw_item_id)
             );
         """)
+        conn.commit()
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+
+def get_bom_unit_qty(finished_item_id: int) -> float:
+    f_df = formulas()
+    if not f_df.empty and "finished_item_id" in f_df.columns:
+        sub = f_df[f_df["finished_item_id"] == finished_item_id]
+        if not sub.empty:
+            s = float(pd.to_numeric(sub["qty_required"], errors="coerce").fillna(0).sum())
+            if s > 0:
+                return s
+    if DATABASE_URL:
+        conn = get_connection()
+        if conn:
+            try:
+                ensure_formulas_table_conn(conn)
+                cur = conn.cursor()
+                cur.execute("SELECT COALESCE(SUM(qty_required), 0) FROM item_formulas WHERE finished_item_id = %s", (finished_item_id,))
+                res = cur.fetchone()
+                if res and res[0] > 0:
+                    return float(res[0])
+            except Exception:
+                pass
+            finally:
+                release_connection(conn)
+    return 1.0
+
+def fix_past_production_voucher_quantities_conn(conn):
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT vi.id, vi.voucher_id, vi.item_id, vi.qty
+            FROM voucher_items vi
+            JOIN vouchers v ON v.id = vi.voucher_id
+            WHERE v.type = 'production' AND vi.direction = 'in'
+        """)
+        rows = cur.fetchall()
+        for vi_id, v_id, item_id, current_qty in rows:
+            bom_unit_qty = get_bom_unit_qty(item_id)
+            if bom_unit_qty > 1.0:
+                cur.execute("""
+                    SELECT COALESCE(SUM(qty), 0)
+                    FROM voucher_items
+                    WHERE voucher_id = %s AND direction = 'out'
+                """, (v_id,))
+                res = cur.fetchone()
+                raw_out_sum = float(res[0]) if res else 0.0
+                expected_qty = round(current_qty * bom_unit_qty, 2)
+                if raw_out_sum > 0 and abs(raw_out_sum - expected_qty) < 0.5:
+                    cur.execute("UPDATE voucher_items SET qty = %s WHERE id = %s", (expected_qty, vi_id))
         conn.commit()
     except Exception:
         try:
@@ -1142,11 +1212,13 @@ def page_vouchers():
                 if f_name in it_map and f_lots > 0:
                     f_id = it_map[f_name]
                     if f_id not in existing_in_ids:
+                        bom_qty_per_lot = get_bom_unit_qty(f_id)
+                        actual_qty = round(f_lots * bom_qty_per_lot, 2)
                         all_stock_entries.append({
                             "item_id": f_id,
                             "item_name": f_name,
                             "direction": "in",
-                            "qty": f_lots,
+                            "qty": actual_qty,
                             "rate": 0.0,
                             "gst_rate": 0
                         })
