@@ -360,14 +360,54 @@ function renderVoucherForm(){
     if(rate) lastRow.querySelector('.i-rate').value = String(rate);
   }
 
+  const bomContainer = form.querySelector('#bom-finished-items-container');
+  const btnAddBomItem = form.querySelector('#btn-add-bom-item-row');
+
+  function renderBomItemRow() {
+    if (!bomContainer) return;
+    const row = el(`
+      <div class="bom-item-p-row" style="display:flex; gap:10px; margin-bottom:8px; align-items:center;">
+        <select class="bom-p-item" style="flex:3;">${itemOptions()}</select>
+        <input type="number" step="1" min="0.01" class="bom-p-lots" value="1.00" placeholder="Lots" style="flex:2;">
+        <button type="button" class="btn ghost btn-rm-bom-p" style="padding:2px 8px;">✕</button>
+      </div>
+    `);
+    row.querySelector('.btn-rm-bom-p').addEventListener('click', () => {
+      if (bomContainer.querySelectorAll('.bom-item-p-row').length > 1) {
+        row.remove();
+      }
+    });
+    bomContainer.appendChild(row);
+  }
+
+  function renderBomItemRows() {
+    if (!bomContainer) return;
+    if (bomContainer.querySelectorAll('.bom-item-p-row').length === 0) {
+      renderBomItemRow();
+    }
+  }
+
+  if (btnAddBomItem) {
+    btnAddBomItem.addEventListener('click', () => renderBomItemRow());
+  }
+
+  function updateProductionRowFields() {
+    const isProd = vTypeSelect.value === 'production';
+    itemsDiv.querySelectorAll('.item-row').forEach(r => {
+      const rateIn = r.querySelector('.i-rate');
+      const gstWrap = r.querySelector('.gst-wrap');
+      if (rateIn) rateIn.style.display = isProd ? 'none' : '';
+      if (gstWrap) gstWrap.style.display = isProd ? 'none' : '';
+    });
+  }
+
   const applyBomBtn = form.querySelector('#btn-apply-bom-prod');
   if(applyBomBtn){
     applyBomBtn.addEventListener('click', ()=>{
       const pRows = form.querySelectorAll('#bom-finished-items-container .bom-item-p-row');
       if(!pRows.length) return;
 
-      const stockInMap = {}; // finishedId -> totalLots
-      const rawOutMap = {};   // rawId -> totalQty
+      const rawOutMap = {}; // rawId -> totalQty
       let missingFormulas = [];
 
       pRows.forEach(r => {
@@ -375,8 +415,6 @@ function renderVoucherForm(){
         const lots = Number(r.querySelector('.bom-p-lots').value || 1);
         const itemObj = STATE.items.find(i=>i.id===finishedId);
         const itemName = itemObj ? itemObj.name : 'Item';
-
-        stockInMap[finishedId] = (stockInMap[finishedId] || 0) + lots;
 
         const matchingFormulas = (STATE.formulas || []).filter(f => f.finished_item_id === finishedId);
         if(!matchingFormulas || matchingFormulas.length === 0){
@@ -395,12 +433,7 @@ function renderVoucherForm(){
 
       itemsDiv.innerHTML = '';
 
-      // Stock IN rows for finished products
-      Object.keys(stockInMap).forEach(fId => {
-        addItemRowWithVals(Number(fId), 'in', stockInMap[fId].toFixed(2), 0);
-      });
-
-      // Stock OUT rows for consolidated raw materials
+      // Stock OUT rows for consolidated raw materials only
       Object.keys(rawOutMap).forEach(rId => {
         addItemRowWithVals(Number(rId), 'out', rawOutMap[rId].toFixed(2), 0);
       });
@@ -455,7 +488,7 @@ function renderVoucherForm(){
       };
     }).filter(e => e.debit > 0 || e.credit > 0);
 
-    const items = [...itemsDiv.querySelectorAll('.item-row')].map(r=>{
+    let items = [...itemsDiv.querySelectorAll('.item-row')].map(r=>{
       const gstBtn  = r.querySelector('.gst-toggle');
       const gstRate = (gstBtn && gstBtn.classList.contains('active'))
                       ? Number(r.querySelector('.i-gst').value || 0) : 0;
@@ -467,6 +500,30 @@ function renderVoucherForm(){
         gst_rate:  gstRate,
       };
     }).filter(i=>i.qty>0);
+
+    if (isProd) {
+      const pRows = form.querySelectorAll('#bom-finished-items-container .bom-item-p-row');
+      pRows.forEach(r => {
+        const finishedId = Number(r.querySelector('.bom-p-item').value);
+        const lots = Number(r.querySelector('.bom-p-lots').value || 1);
+        if (finishedId && lots > 0) {
+          const exists = items.some(i => i.item_id === finishedId && i.direction === 'in');
+          if (!exists) {
+            const matchingFormulas = (STATE.formulas || []).filter(f => f.finished_item_id === finishedId);
+            let bomSum = matchingFormulas.reduce((acc, f) => acc + Number(f.qty_required || 0), 0);
+            if (bomSum === 0) bomSum = 1;
+            const totalQty = Number((lots * bomSum).toFixed(2));
+            items.unshift({
+              item_id: finishedId,
+              direction: 'in',
+              qty: totalQty,
+              rate: 0,
+              gst_rate: 0
+            });
+          }
+        }
+      });
+    }
 
     if (!isProd) {
       const badEntry = entries.find(e => e.debit > 0 && e.credit > 0);
