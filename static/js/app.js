@@ -385,7 +385,7 @@ function renderVoucherForm(){
       // Rows 1..N: Raw Materials OUT
       matchingFormulas.forEach(f => {
         const rawQty = Number(f.qty_required || 0) * lots;
-        addItemRowWithVals(f.raw_item_id, 'out', rawQty.toFixed(4), 0);
+        addItemRowWithVals(f.raw_item_id, 'out', rawQty.toFixed(2), 0);
       });
     });
   }
@@ -982,7 +982,7 @@ function renderItems(){
           </div>
           <div>
             <label style="font-size:11px;">Qty per 1 Lot</label>
-            <input type="number" step="0.0001" min="0" class="bom-raw-qty" placeholder="Qty" value="${defQty}">
+            <input type="number" step="0.01" min="0" class="bom-raw-qty" placeholder="Qty" value="${defQty}">
           </div>
         </div>`);
 

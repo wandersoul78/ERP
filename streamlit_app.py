@@ -825,7 +825,7 @@ def page_items():
                             def_qty = float(ex_qty)
 
                     rm_sel = c_rm.selectbox(f"Raw Material #{idx+1}", rm_options, index=rm_options.index(def_rm) if def_rm in rm_options else 0, key=f"bom_rm_{f_id}_{idx}")
-                    rm_qty = c_qty.number_input(f"Qty per 1 Lot #{idx+1}", min_value=0.0, step=0.01, value=def_qty, format="%.4f", key=f"bom_qty_{f_id}_{idx}")
+                    rm_qty = c_qty.number_input(f"Qty per 1 Lot #{idx+1}", min_value=0.0, step=0.01, value=def_qty, format="%.2f", key=f"bom_qty_{f_id}_{idx}")
 
                     if rm_sel != "-- None --" and rm_qty > 0:
                         raw_id = int(it_df[it_df["Name"] == rm_sel].iloc[0]["ID"])
@@ -1044,7 +1044,7 @@ def page_vouchers():
                         row_num = r_idx + 1
                         st.session_state[f"v_item_{row_num}"] = r_row["raw_name"]
                         st.session_state[f"v_dir_{row_num}"] = "out"
-                        st.session_state[f"v_qty_{row_num}"] = round(float(r_row["qty_required"]) * float(batch_lots), 4)
+                        st.session_state[f"v_qty_{row_num}"] = round(float(r_row["qty_required"]) * float(batch_lots), 2)
                         st.session_state[f"v_rate_{row_num}"] = 0.0
                         st.session_state[f"v_gst_{row_num}"] = 0.0
 
