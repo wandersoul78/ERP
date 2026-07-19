@@ -21,57 +21,90 @@ ACCOUNT_TYPES = ["asset", "liability", "income", "expense", "equity"]
 VOUCHER_TYPES = ["sales", "purchase", "payment", "receipt", "journal", "production"]
 
 # ================================================================
-#  CONNECTION & DATA LOADING
+#  CONNECTION & DATA LOADING (OPTIMIZED WITH POOLING)
 # ================================================================
+from psycopg2 import pool
+
+@st.cache_resource
+def get_db_pool(db_url: str):
+    return pool.ThreadedConnectionPool(
+        1, 10, db_url,
+        keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=5
+    )
+
+def get_connection():
+    if not DATABASE_URL:
+        return None
+    try:
+        p = get_db_pool(DATABASE_URL)
+        return p.getconn()
+    except Exception:
+        return psycopg2.connect(DATABASE_URL)
+
+def release_connection(conn):
+    if not DATABASE_URL or conn is None:
+        return
+    try:
+        p = get_db_pool(DATABASE_URL)
+        p.putconn(conn)
+    except Exception:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
 def _df(name: str) -> pd.DataFrame:
     if not DATABASE_URL:
         st.error("Database connection URL not set. Please set SUPABASE_DB_URL in .env or st.secrets.")
         return pd.DataFrame()
 
-    conn = psycopg2.connect(DATABASE_URL)
-    
-    if name == "Accounts":
-        query = "SELECT * FROM accounts"
-        col_map = {"id": "ID", "name": "Name", "type": "Type", "opening_balance": "Opening Balance", "opening_side": "Opening Side"}
-    elif name == "Items":
-        query = "SELECT * FROM items"
-        col_map = {"id": "ID", "name": "Name", "unit": "Unit", "opening_qty": "Opening Qty", "opening_rate": "Opening Rate"}
-    elif name == "Vouchers":
-        query = "SELECT * FROM vouchers"
-        col_map = {"id": "ID", "date": "Date", "type": "Type", "reference": "Reference", "narration": "Narration", "created_at": "Created At"}
-    elif name == "Entries":
-        query = """
-            SELECT ve.id, ve.voucher_id, ve.account_id, a.name AS account_name, ve.debit, ve.credit
-            FROM voucher_entries ve
-            JOIN accounts a ON a.id = ve.account_id
-        """
-        col_map = {"id": "ID", "voucher_id": "Voucher ID", "account_id": "Account ID", "account_name": "Account Name", "debit": "Debit", "credit": "Credit"}
-    elif name == "Stock Lines":
-        query = """
-            SELECT vi.id, vi.voucher_id, vi.item_id, i.name AS item_name, vi.direction, vi.qty, vi.rate, vi.gst_rate
-            FROM voucher_items vi
-            JOIN items i ON i.id = vi.item_id
-        """
-        col_map = {"id": "ID", "voucher_id": "Voucher ID", "item_id": "Item ID", "item_name": "Item Name", "direction": "Direction", "qty": "Qty", "rate": "Rate", "gst_rate": "GST Rate"}
-    else:
-        conn.close()
+    conn = get_connection()
+    if not conn:
         return pd.DataFrame()
 
-    df = pd.read_sql_query(query, conn)
-    conn.close()
-    
-    # Rename columns to match the old format
-    df.rename(columns=col_map, inplace=True)
-    return df
+    try:
+        if name == "Accounts":
+            query = "SELECT * FROM accounts"
+            col_map = {"id": "ID", "name": "Name", "type": "Type", "opening_balance": "Opening Balance", "opening_side": "Opening Side"}
+        elif name == "Items":
+            query = "SELECT * FROM items"
+            col_map = {"id": "ID", "name": "Name", "unit": "Unit", "opening_qty": "Opening Qty", "opening_rate": "Opening Rate"}
+        elif name == "Vouchers":
+            query = "SELECT * FROM vouchers"
+            col_map = {"id": "ID", "date": "Date", "type": "Type", "reference": "Reference", "narration": "Narration", "created_at": "Created At"}
+        elif name == "Entries":
+            query = """
+                SELECT ve.id, ve.voucher_id, ve.account_id, a.name AS account_name, ve.debit, ve.credit
+                FROM voucher_entries ve
+                JOIN accounts a ON a.id = ve.account_id
+            """
+            col_map = {"id": "ID", "voucher_id": "Voucher ID", "account_id": "Account ID", "account_name": "Account Name", "debit": "Debit", "credit": "Credit"}
+        elif name == "Stock Lines":
+            query = """
+                SELECT vi.id, vi.voucher_id, vi.item_id, i.name AS item_name, vi.direction, vi.qty, vi.rate, vi.gst_rate
+                FROM voucher_items vi
+                JOIN items i ON i.id = vi.item_id
+            """
+            col_map = {"id": "ID", "voucher_id": "Voucher ID", "item_id": "Item ID", "item_name": "Item Name", "direction": "Direction", "qty": "Qty", "rate": "Rate", "gst_rate": "GST Rate"}
+        else:
+            return pd.DataFrame()
+
+        df = pd.read_sql_query(query, conn)
+        df.rename(columns=col_map, inplace=True)
+        return df
+    finally:
+        release_connection(conn)
 
 def load_data():
     if not DATABASE_URL:
         st.error("Database connection URL not set. Please set SUPABASE_DB_URL in .env or st.secrets.")
         return
 
+    conn = get_connection()
+    if not conn:
+        return
+
     try:
-        conn = psycopg2.connect(DATABASE_URL)
-        
         # Accounts
         df_acc = pd.read_sql_query("SELECT * FROM accounts", conn)
         df_acc.rename(columns={"id": "ID", "name": "Name", "type": "Type", "opening_balance": "Opening Balance", "opening_side": "Opening Side"}, inplace=True)
@@ -105,10 +138,11 @@ def load_data():
         df_sl.rename(columns={"id": "ID", "voucher_id": "Voucher ID", "item_id": "Item ID", "item_name": "Item Name", "direction": "Direction", "qty": "Qty", "rate": "Rate", "gst_rate": "GST Rate"}, inplace=True)
         st.session_state["stock_lines"] = df_sl
 
-        conn.close()
-        st.session_state["loaded_at"]   = datetime.now().strftime("%H:%M:%S")
+        st.session_state["loaded_at"] = datetime.now().strftime("%H:%M:%S")
     except Exception as err:
         st.error(f"Error loading database tables: {err}")
+    finally:
+        release_connection(conn)
 
 def ensure_loaded():
     if "accounts" not in st.session_state:
@@ -121,7 +155,7 @@ def entries()     -> pd.DataFrame: return st.session_state.get("entries", pd.Dat
 def stock_lines() -> pd.DataFrame: return st.session_state.get("stock_lines", pd.DataFrame())
 
 # ================================================================
-#  WRITE HELPERS
+#  WRITE HELPERS (BATCHED & POOLED)
 # ================================================================
 def _next_id(tab_or_df, col: str = "ID") -> int:
     tab_map = {
@@ -142,22 +176,26 @@ def _next_id(tab_or_df, col: str = "ID") -> int:
         return int(vals.max()) + 1 if len(vals) > 0 else 1
 
     if table_name and DATABASE_URL:
-        try:
-            conn = psycopg2.connect(DATABASE_URL)
-            cur = conn.cursor()
-            cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table_name}")
-            row = cur.fetchone()
-            conn.close()
-            return int(row[0] or 0) + 1
-        except Exception:
-            pass
+        conn = get_connection()
+        if conn:
+            try:
+                cur = conn.cursor()
+                cur.execute(f"SELECT COALESCE(MAX(id), 0) FROM {table_name}")
+                row = cur.fetchone()
+                return int(row[0] or 0) + 1
+            except Exception:
+                pass
+            finally:
+                release_connection(conn)
             
     return 1
 
 def _append(tab: str, row: list):
     if not DATABASE_URL:
         return
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_connection()
+    if not conn:
+        return
     cur = conn.cursor()
     try:
         if tab == "Accounts":
@@ -207,12 +245,14 @@ def _append(tab: str, row: list):
         conn.rollback()
         raise err
     finally:
-        conn.close()
+        release_connection(conn)
 
 def _save_voucher_transaction(v_date, v_type, reference, narration, entry_data, stock_entries) -> int:
     if not DATABASE_URL:
         return 0
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_connection()
+    if not conn:
+        return 0
     cur = conn.cursor()
     try:
         cur.execute("SELECT setval('vouchers_id_seq', COALESCE((SELECT MAX(id) FROM vouchers), 0))")
@@ -232,12 +272,15 @@ def _save_voucher_transaction(v_date, v_type, reference, narration, entry_data, 
             cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM voucher_entries")
             e_id = cur.fetchone()[0]
 
-            for idx, e in enumerate(valid_entries):
-                cur.execute(
-                    "INSERT INTO voucher_entries (id, voucher_id, account_id, debit, credit) VALUES (%s, %s, %s, %s, %s) "
-                    "ON CONFLICT (id) DO UPDATE SET debit=EXCLUDED.debit, credit=EXCLUDED.credit",
-                    [e_id + idx, v_id, e["account_id"], e["debit"], e["credit"]]
-                )
+            entry_tuples = [
+                (e_id + idx, v_id, e["account_id"], e["debit"], e["credit"])
+                for idx, e in enumerate(valid_entries)
+            ]
+            cur.executemany(
+                "INSERT INTO voucher_entries (id, voucher_id, account_id, debit, credit) VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET debit=EXCLUDED.debit, credit=EXCLUDED.credit",
+                entry_tuples
+            )
             cur.execute("SELECT setval('voucher_entries_id_seq', COALESCE((SELECT MAX(id) FROM voucher_entries), 0))")
 
         if stock_entries:
@@ -245,12 +288,15 @@ def _save_voucher_transaction(v_date, v_type, reference, narration, entry_data, 
             cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM voucher_items")
             sl_id = cur.fetchone()[0]
 
-            for idx, s in enumerate(stock_entries):
-                cur.execute(
-                    "INSERT INTO voucher_items (id, voucher_id, item_id, direction, qty, rate, gst_rate) VALUES (%s, %s, %s, %s, %s, %s, %s) "
-                    "ON CONFLICT (id) DO UPDATE SET qty=EXCLUDED.qty, rate=EXCLUDED.rate, gst_rate=EXCLUDED.gst_rate",
-                    [sl_id + idx, v_id, s["item_id"], s["direction"], s["qty"], s["rate"], s["gst_rate"]]
-                )
+            stock_tuples = [
+                (sl_id + idx, v_id, s["item_id"], s["direction"], s["qty"], s["rate"], s["gst_rate"])
+                for idx, s in enumerate(stock_entries)
+            ]
+            cur.executemany(
+                "INSERT INTO voucher_items (id, voucher_id, item_id, direction, qty, rate, gst_rate) VALUES (%s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET qty=EXCLUDED.qty, rate=EXCLUDED.rate, gst_rate=EXCLUDED.gst_rate",
+                stock_tuples
+            )
             cur.execute("SELECT setval('voucher_items_id_seq', COALESCE((SELECT MAX(id) FROM voucher_items), 0))")
 
         conn.commit()
@@ -259,12 +305,14 @@ def _save_voucher_transaction(v_date, v_type, reference, narration, entry_data, 
         conn.rollback()
         raise err
     finally:
-        conn.close()
+        release_connection(conn)
 
 def _update_voucher_transaction(v_id, ev_date, v_type, ev_ref, ev_nar, ev_entries_data, ev_stock_entries):
     if not DATABASE_URL:
         return
-    conn = psycopg2.connect(DATABASE_URL)
+    conn = get_connection()
+    if not conn:
+        return
     cur = conn.cursor()
     try:
         cur.execute(
@@ -278,11 +326,14 @@ def _update_voucher_transaction(v_id, ev_date, v_type, ev_ref, ev_nar, ev_entrie
             cur.execute("SELECT setval('voucher_entries_id_seq', COALESCE((SELECT MAX(id) FROM voucher_entries), 0))")
             cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM voucher_entries")
             e_id = cur.fetchone()[0]
-            for idx, e in enumerate(valid_entries):
-                cur.execute(
-                    "INSERT INTO voucher_entries (id, voucher_id, account_id, debit, credit) VALUES (%s, %s, %s, %s, %s)",
-                    [e_id + idx, v_id, e["account_id"], e["debit"], e["credit"]]
-                )
+            entry_tuples = [
+                (e_id + idx, v_id, e["account_id"], e["debit"], e["credit"])
+                for idx, e in enumerate(valid_entries)
+            ]
+            cur.executemany(
+                "INSERT INTO voucher_entries (id, voucher_id, account_id, debit, credit) VALUES (%s, %s, %s, %s, %s)",
+                entry_tuples
+            )
             cur.execute("SELECT setval('voucher_entries_id_seq', COALESCE((SELECT MAX(id) FROM voucher_entries), 0))")
 
         cur.execute("DELETE FROM voucher_items WHERE voucher_id = %s", (v_id,))
@@ -290,11 +341,14 @@ def _update_voucher_transaction(v_id, ev_date, v_type, ev_ref, ev_nar, ev_entrie
             cur.execute("SELECT setval('voucher_items_id_seq', COALESCE((SELECT MAX(id) FROM voucher_items), 0))")
             cur.execute("SELECT COALESCE(MAX(id), 0) + 1 FROM voucher_items")
             sl_id = cur.fetchone()[0]
-            for idx, s in enumerate(ev_stock_entries):
-                cur.execute(
-                    "INSERT INTO voucher_items (id, voucher_id, item_id, direction, qty, rate, gst_rate) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                    [sl_id + idx, v_id, s["item_id"], s["direction"], s["qty"], s["rate"], s["gst_rate"]]
-                )
+            stock_tuples = [
+                (sl_id + idx, v_id, s["item_id"], s["direction"], s["qty"], s["rate"], s["gst_rate"])
+                for idx, s in enumerate(stock_entries)
+            ]
+            cur.executemany(
+                "INSERT INTO voucher_items (id, voucher_id, item_id, direction, qty, rate, gst_rate) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                stock_tuples
+            )
             cur.execute("SELECT setval('voucher_items_id_seq', COALESCE((SELECT MAX(id) FROM voucher_items), 0))")
 
         conn.commit()
@@ -302,41 +356,53 @@ def _update_voucher_transaction(v_id, ev_date, v_type, ev_ref, ev_nar, ev_entrie
         conn.rollback()
         raise err
     finally:
-        conn.close()
+        release_connection(conn)
 
 def _delete_rows_where(tab: str, col: str, value):
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    col_map = {"ID": "id", "Voucher ID": "voucher_id"}
-    db_col = col_map.get(col, col.lower())
-    
-    if tab == "Accounts":
-        cur.execute(f"DELETE FROM accounts WHERE {db_col} = %s", (value,))
-    elif tab == "Items":
-        cur.execute(f"DELETE FROM items WHERE {db_col} = %s", (value,))
-    elif tab == "Vouchers":
-        cur.execute(f"DELETE FROM vouchers WHERE {db_col} = %s", (value,))
-    elif tab == "Entries":
-        cur.execute(f"DELETE FROM voucher_entries WHERE {db_col} = %s", (value,))
-    elif tab == "Stock Lines":
-        cur.execute(f"DELETE FROM voucher_items WHERE {db_col} = %s", (value,))
-    conn.commit()
-    conn.close()
+    if not DATABASE_URL:
+        return
+    conn = get_connection()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        col_map = {"ID": "id", "Voucher ID": "voucher_id"}
+        db_col = col_map.get(col, col.lower())
+        
+        if tab == "Accounts":
+            cur.execute(f"DELETE FROM accounts WHERE {db_col} = %s", (value,))
+        elif tab == "Items":
+            cur.execute(f"DELETE FROM items WHERE {db_col} = %s", (value,))
+        elif tab == "Vouchers":
+            cur.execute(f"DELETE FROM vouchers WHERE {db_col} = %s", (value,))
+        elif tab == "Entries":
+            cur.execute(f"DELETE FROM voucher_entries WHERE {db_col} = %s", (value,))
+        elif tab == "Stock Lines":
+            cur.execute(f"DELETE FROM voucher_items WHERE {db_col} = %s", (value,))
+        conn.commit()
+    finally:
+        release_connection(conn)
 
 def _update_row_where(tab: str, col_id: str, id_val, new_values: list):
-    conn = psycopg2.connect(DATABASE_URL)
-    cur = conn.cursor()
-    if tab == "Accounts":
-        cur.execute("UPDATE accounts SET name = %s, type = %s, opening_balance = %s, opening_side = %s WHERE id = %s",
-                    (new_values[1], new_values[2], new_values[3], new_values[4], id_val))
-    elif tab == "Items":
-        cur.execute("UPDATE items SET name = %s, unit = %s, opening_qty = %s, opening_rate = %s WHERE id = %s",
-                    (new_values[1], new_values[2], new_values[3], new_values[4], id_val))
-    elif tab == "Vouchers":
-        cur.execute("UPDATE vouchers SET date = %s, type = %s, reference = %s, narration = %s WHERE id = %s",
-                    (new_values[1], new_values[2], new_values[3], new_values[4], id_val))
-    conn.commit()
-    conn.close()
+    if not DATABASE_URL:
+        return
+    conn = get_connection()
+    if not conn:
+        return
+    try:
+        cur = conn.cursor()
+        if tab == "Accounts":
+            cur.execute("UPDATE accounts SET name = %s, type = %s, opening_balance = %s, opening_side = %s WHERE id = %s",
+                        (new_values[1], new_values[2], new_values[3], new_values[4], id_val))
+        elif tab == "Items":
+            cur.execute("UPDATE items SET name = %s, unit = %s, opening_qty = %s, opening_rate = %s WHERE id = %s",
+                        (new_values[1], new_values[2], new_values[3], new_values[4], id_val))
+        elif tab == "Vouchers":
+            cur.execute("UPDATE vouchers SET date = %s, type = %s, reference = %s, narration = %s WHERE id = %s",
+                        (new_values[1], new_values[2], new_values[3], new_values[4], id_val))
+        conn.commit()
+    finally:
+        release_connection(conn)
 
 # ================================================================
 #  REPORT COMPUTATIONS
