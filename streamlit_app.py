@@ -878,16 +878,6 @@ def page_vouchers():
     accs = accounts()
     it_df = items()
 
-    if not v_df.empty:
-        st.subheader("Voucher List")
-        search = st.text_input("Search (type / reference / narration)", "")
-        disp = v_df.copy()
-        if search:
-            mask = disp.apply(lambda r: search.lower() in str(r).lower(), axis=1)
-            disp = disp[mask]
-        st.dataframe(disp, use_container_width=True, hide_index=True)
-
-    st.divider()
     st.subheader("Create New Voucher")
 
     if accs.empty:
@@ -1091,7 +1081,7 @@ def page_vouchers():
                 if missing_formulas:
                     st.warning(f"No BOM formula set for: {', '.join(missing_formulas)}. Set formula under Items -> Set Formula first.")
 
-                if stock_in_dict:
+                if raw_out_dict:
                     for j in range(st.session_state.get("inv_rows", 1)):
                         st.session_state.pop(f"v_item_{j}", None)
                         st.session_state.pop(f"v_dir_{j}", None)
@@ -1099,18 +1089,9 @@ def page_vouchers():
                         st.session_state.pop(f"v_rate_{j}", None)
                         st.session_state.pop(f"v_gst_{j}", None)
 
-                    total_rows = len(stock_in_dict) + len(raw_out_dict)
-                    st.session_state.inv_rows = total_rows
+                    st.session_state.inv_rows = len(raw_out_dict)
 
                     row_idx = 0
-                    for f_name, f_qty in stock_in_dict.items():
-                        st.session_state[f"v_item_{row_idx}"] = f_name
-                        st.session_state[f"v_dir_{row_idx}"] = "in"
-                        st.session_state[f"v_qty_{row_idx}"] = round(f_qty, 2)
-                        st.session_state[f"v_rate_{row_idx}"] = 0.0
-                        st.session_state[f"v_gst_{row_idx}"] = 0.0
-                        row_idx += 1
-
                     for r_name, r_qty in raw_out_dict.items():
                         st.session_state[f"v_item_{row_idx}"] = r_name
                         st.session_state[f"v_dir_{row_idx}"] = "out"
@@ -1119,7 +1100,7 @@ def page_vouchers():
                         st.session_state[f"v_gst_{row_idx}"] = 0.0
                         row_idx += 1
 
-                    st.success(f"Auto-filled {len(stock_in_dict)} finished product(s) and {len(raw_out_dict)} consolidated raw material line(s).")
+                    st.success(f"Auto-filled {len(raw_out_dict)} consolidated raw material line(s).")
                     st.rerun()
 
         stock_entries = []
@@ -1154,8 +1135,25 @@ def page_vouchers():
         if st.button("✅ Save Production Voucher", type="primary"):
             v_id  = _next_id(v_df)
             sl_id = _next_id(stock_lines())
+
+            all_stock_entries = []
+            existing_in_ids = {s["item_id"] for s in stock_entries if s["direction"] == "in"}
+            for f_name, f_lots in selected_finished_items:
+                if f_name in it_map and f_lots > 0:
+                    f_id = it_map[f_name]
+                    if f_id not in existing_in_ids:
+                        all_stock_entries.append({
+                            "item_id": f_id,
+                            "item_name": f_name,
+                            "direction": "in",
+                            "qty": f_lots,
+                            "rate": 0.0,
+                            "gst_rate": 0
+                        })
+            all_stock_entries.extend(stock_entries)
+
             _append("Vouchers", [v_id, str(v_date), v_type, reference, narration, datetime.now().isoformat()])
-            for i, s in enumerate(stock_entries):
+            for i, s in enumerate(all_stock_entries):
                 _append("Stock Lines", [sl_id+i, v_id, s["item_id"], s["item_name"],
                                         s["direction"], s["qty"], s["rate"], s["gst_rate"]])
             st.success(f"Production voucher #{v_id} saved.")
